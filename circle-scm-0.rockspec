@@ -1,4 +1,4 @@
-package = "lua-circle"
+package = "circle"
 version = "scm-0"
 
 description = {
@@ -20,7 +20,6 @@ dependencies = {
 build = {
 	type = "builtin",
 	modules = {
-		["circle.client"] = "src/circle/client.lua",
-		["circle.format"] = "src/circle/format.lua",
+		["circle"] = "src/circle.lua",
 	}
 }
