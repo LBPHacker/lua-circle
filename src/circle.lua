@@ -74,12 +74,6 @@ end
 local client_i = {}
 local client_m = { __index = client_i }
 
-local function handle_by_hook(command)
-	client_i["handle_" .. command .. "_"] = function(self, ...)
-		self:call_hook_(command, ...)
-	end
-end
-
 function client_i:get_lusers()
 	return self.lusers_
 end
@@ -100,11 +94,11 @@ function client_i:get_all_death_reasons()
 	return self.all_death_reasons_
 end
 
-function client_i:get_raw_nick()
+function client_i:get_nick()
 	return self.raw_nick_
 end
 
-function client_i:get_nick()
+function client_i:get_canonical_nick()
 	return self.nick_
 end
 
@@ -117,7 +111,7 @@ function client_i:get_welcome()
 end
 
 function client_i:lower(str)
-	local lower = casemappings[self.effective_casemapping_].lower
+	local lower = casemappings[self.casemapping_].lower
 	local out = {}
 	for letter in str:gmatch(".") do
 		table.insert(out, lower[letter] or letter)
@@ -126,62 +120,12 @@ function client_i:lower(str)
 end
 
 function client_i:upper(str)
-	local upper = casemappings[self.effective_casemapping_].upper
+	local upper = casemappings[self.casemapping_].upper
 	local out = {}
 	for letter in str:gmatch(".") do
 		table.insert(out, upper[letter] or letter)
 	end
 	return table.concat(out)
-end
-
-function client_i:parse_prefix_()
-	local nick, user, host = self.last_prefix_:match("^([^!]*)!([^@]*)@([^@]*)$")
-	return self:lower(nick), user, host
-end
-
-function client_i:parse_line_(line_without_crlf)
-	if line_without_crlf:find("[^\1-\255]") then
-		return
-	end
-	local command, prefix
-	local params = {}
-	do
-		local rest
-		prefix, rest = line_without_crlf:match("^:([^ ]+) (.*)$")
-		if prefix then
-			line_without_crlf = rest
-		end
-	end
-	do
-		local rest
-		command, rest = line_without_crlf:match("^(%d%d%d)(.*)$")
-		if not command then
-			command, rest = line_without_crlf:match("^([A-Za-z]+)(.*)$")
-		end
-		if not command then
-			return
-		end
-		line_without_crlf = rest
-	end
-	while #params < 14 do
-		local param, rest = line_without_crlf:match("^ ([^: ][^ ]*)(.*)$")
-		if not param then
-			break
-		end
-		table.insert(params, param)
-		line_without_crlf = rest
-	end
-	do
-		local trailing = line_without_crlf:match(#params == 14 and "^ :?(.*)$" or "^ :(.*)$")
-		if trailing then
-			table.insert(params, trailing)
-		end
-		line_without_crlf = ""
-	end
-	if line_without_crlf ~= "" then
-		return
-	end
-	return command:lower(), params, prefix
 end
 
 function client_i:send_(command, middles, trailing, prefix)
@@ -216,6 +160,12 @@ end
 
 function client_i:warn_incoming_(message)
 	print(message)
+end
+
+local function handle_by_hook(command)
+	client_i["handle_" .. command .. "_"] = function(self, ...)
+		self:call_hook_(command, ...)
+	end
 end
 
 function client_i:handle_001_(welcome) -- * RPL_WELCOME
@@ -285,7 +235,7 @@ function client_i:handle_004_(server_name, server_version, user_modes, channel_m
 	self.registered_ = true
 	self.expecting_welcome_ = nil
 	self.expecting_isupport_ = "005"
-	self:call_hook_("register", self.welcome_)
+	self:call_hook_("welcome", self.welcome_)
 end
 
 function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
@@ -527,6 +477,218 @@ function client_i:handle_484_() -- * ERR_RESTRICTED
 	end
 end
 
+function client_i:handle_join_(channels)
+	if not self.last_prefix_.nick then
+		self:stop_("join with no nickname specified in prefix")
+		return
+	end
+	if not channels then
+		self:stop_("join with no channels specified")
+		return
+	end
+	if self:prefix_is_self_() then
+		for channel in channels:gmatch("[^,]+") do
+			if self.channels_[channel] then
+				self:warn_incoming_("channel " .. channel .. " in join list while already joined")
+			else
+				self.channels_[channel] = {}
+				self:call_hook_("self_join", channel, self.channels_[channel])
+			end
+		end
+	end
+end
+
+function client_i:handle_nick_(new)
+	if not self.last_prefix_.nick then
+		self:stop_("nick with no nickname specified in prefix")
+		return
+	end
+	if not new then
+		self:stop_("nick with no new nickname specified")
+		return
+	end
+	if self:prefix_is_self_() then
+		self:update_nick_(new)
+	end
+	if self.setting_nick_ then
+		self.setting_nick_:signal()
+		self.setting_nick_ = nil
+	end
+end
+
+function client_i:handle_part_(channels)
+	if not self.last_prefix_.nick then
+		self:stop_("part with no nickname specified in prefix")
+		return
+	end
+	if not channels then
+		self:stop_("part with no channels specified")
+		return
+	end
+	if self:prefix_is_self_() then
+		for channel in channels:gmatch("[^,]+") do
+			if not self.channels_[channel] then
+				self:warn_incoming_("channel " .. channel .. " in part list while not joined")
+			else
+				self:call_hook_("self_part", channel, self.channels_[channel])
+				self.channels_[channel] = nil
+			end
+		end
+	end
+end
+
+function client_i:handle_ping_(server, server2)
+	if not server then
+		self:stop_("ping with no server specified")
+		return
+	end
+	self:send_("pong", { server, server2 })
+end
+
+function client_i:pre_handler_(command) -- * Used for edge-triggering.
+	if self.expecting_welcome_ and command ~= self.expecting_welcome_ then
+		self:stop_("bad welcome sequence: expected " .. self.expecting_welcome_ .. ", got " .. command)
+		self.expecting_welcome_ = nil
+	end
+	if self.expecting_isupport_ and command ~= self.expecting_isupport_ then
+		self.expecting_isupport_ = nil
+		if not next(self.isupport_tokens_) then
+			-- * TODO: handle this somehow
+			self:warn_incoming_("server sent no ISUPPORT tokens")
+			self.compat_flags_.no_isupport = true
+		end
+		self:process_isupport_()
+	end
+end
+
+function client_i:post_handler_(command) -- * Used for edge-triggering.
+	if self.receiving_lusers_ and not self.handled_lusers_ then
+		self:call_hook_("lusers", self.lusers_)
+	end
+	self.receiving_lusers_ = self.handled_lusers_
+	self.handled_lusers_ = nil
+end
+
+function client_i:dispatch_()
+	local socket_pollable = { pollfd = self.client_socket_:pollfd(), events = "r" }
+	while self.status_ == "running" do
+		local ready = assert(cqueues.poll(socket_pollable, self.stopping_cond_))
+		-- * Since we exit the loop immediately if self.stopping_cond_ is signalled,
+		--   it's okay to compare ready only with socket_pollable.
+		if ready == socket_pollable then
+			-- * self.client_socket_ is in "tl" mode by default; read a line.
+			local line_without_crlf, err = self.client_socket_:read()
+			if line_without_crlf then
+				self:process_line_(line_without_crlf)
+			else
+				self:stop_("read failed: " .. tostring(err))
+			end
+		end
+	end
+end
+
+function client_i:prefix_is_self_()
+	return self.last_prefix_.nick == self.nick_
+end
+
+function client_i:parse_line_(line_without_crlf)
+	if line_without_crlf:find("[^\1-\255]") then
+		return
+	end
+	local command, prefix
+	local params = {}
+	do
+		local rest
+		prefix, rest = line_without_crlf:match("^:([^ ]+) (.*)$")
+		if prefix then
+			line_without_crlf = rest
+		end
+	end
+	do
+		local rest
+		command, rest = line_without_crlf:match("^(%d%d%d)(.*)$")
+		if not command then
+			command, rest = line_without_crlf:match("^([A-Za-z]+)(.*)$")
+		end
+		if not command then
+			return
+		end
+		line_without_crlf = rest
+	end
+	while #params < 14 do
+		local param, rest = line_without_crlf:match("^ ([^: ][^ ]*)(.*)$")
+		if not param then
+			break
+		end
+		table.insert(params, param)
+		line_without_crlf = rest
+	end
+	do
+		local trailing = line_without_crlf:match(#params == 14 and "^ :?(.*)$" or "^ :(.*)$")
+		if trailing then
+			table.insert(params, trailing)
+		end
+		line_without_crlf = ""
+	end
+	if line_without_crlf ~= "" then
+		return
+	end
+	return command:lower(), params, prefix
+end
+
+function client_i:process_line_(line_without_crlf)
+	local command, params, prefix = self:parse_line_(line_without_crlf)
+	if command then
+		self:process_prefix_(prefix)
+		self:pre_handler_(command)
+		local handler = self["handle_" .. command .. "_"]
+		if handler then
+			handler(self, unpack(params))
+		else
+			local quoted_params = {}
+			for ix = 1, #params do
+				table.insert(quoted_params, ("%q"):format(params[ix]))
+			end
+			self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
+		end
+		self:post_handler_(command)
+	end
+end
+
+function client_i:process_prefix_(prefix)
+	self.last_prefix_.raw = prefix or false
+	if prefix then
+		local nick_and_user, host = prefix:match("^(.*)@([^@]+)$")
+		nick_and_user = nick_and_user or prefix
+		local nick, user = nick_and_user:match("^(.*)!([^!]+)$")
+		nick = nick or nick_and_user
+		self.last_prefix_.nick = nick and self:lower(nick) or false
+		self.last_prefix_.user = user or false
+		self.last_prefix_.host = host or false
+	else
+		self.last_prefix_.nick = false
+		self.last_prefix_.user = false
+		self.last_prefix_.host = false
+	end
+end
+
+function client_i:process_isupport_()
+	if self.isupport_tokens_.CASEMAPPING then
+		if not casemappings[self.isupport_tokens_.CASEMAPPING] then
+			self:stop_("unknown casemapping " .. self.isupport_tokens_.CASEMAPPING)
+			return
+		end
+		local old_nick = self.nick_
+		self.casemapping_ = self.isupport_tokens_.CASEMAPPING
+		if self:lower(self.raw_nick_) ~= old_nick then
+			self:update_nick_(self.raw_nick_)
+		end
+	else
+		self:warn_incoming_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.casemapping_)
+	end
+	self:call_hook_("isupport", self.isupport_tokens_)
+end
+
 do
 	local error_messages = {
 		[263] = "rate-limited",
@@ -606,107 +768,7 @@ end
 function client_i:update_nick_(new)
 	self.raw_nick_ = new
 	self.nick_ = self:lower(new)
-end
-
-function client_i:handle_nick_(new)
-	local old = self:parse_prefix_()
-	if not old then
-		self:stop_("nick with no nickname specified in prefix")
-		return
-	end
-	if not new then
-		self:stop_("nick with no new nickname specified")
-		return
-	end
-	if self:lower(old) == self.nick_ then
-		self:update_nick_(new)
-	end
-	if self.setting_nick_ then
-		self.setting_nick_:signal()
-		self.setting_nick_ = nil
-	end
-end
-
-function client_i:handle_ping_(server, server2)
-	if not server then
-		self:stop_("ping with no server specified")
-		return
-	end
-	self:send_("pong", { server, server2 })
-end
-
-function client_i:process_isupport_()
-	if self.isupport_tokens_.CASEMAPPING then
-		if not casemappings[self.isupport_tokens_.CASEMAPPING] then
-			self:stop_("unknown casemapping " .. self.isupport_tokens_.CASEMAPPING)
-			return
-		end
-		local old_nick = self.nick_
-		self.effective_casemapping_ = self.isupport_tokens_.CASEMAPPING
-		if self:lower(self.raw_nick_) ~= old_nick then
-			self:update_nick_(self.raw_nick_)
-		end
-	else
-		self:warn_incoming_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.effective_casemapping_)
-	end
-	self:call_hook_("isupport", self.isupport_tokens_)
-end
-
-function client_i:pre_handler_(command) -- * Used for edge-triggering.
-	if self.expecting_welcome_ and command ~= self.expecting_welcome_ then
-		self:stop_("bad welcome sequence: expected " .. self.expecting_welcome_ .. ", got " .. command)
-		self.expecting_welcome_ = nil
-	end
-	if self.expecting_isupport_ and command ~= self.expecting_isupport_ then
-		self.expecting_isupport_ = nil
-		if not next(self.isupport_tokens_) then
-			-- * TODO: handle this somehow
-			self:warn_incoming_("server sent no ISUPPORT tokens")
-			self.compat_flags_.no_isupport = true
-		end
-		self:process_isupport_()
-	end
-end
-
-function client_i:post_handler_(command) -- * Used for edge-triggering.
-	if self.receiving_lusers_ and not self.handled_lusers_ then
-		self:call_hook_("lusers", self.lusers_)
-	end
-	self.receiving_lusers_ = self.handled_lusers_
-	self.handled_lusers_ = nil
-end
-
-function client_i:dispatch_()
-	local socket_pollable = { pollfd = self.client_socket_:pollfd(), events = "r" }
-	while self.status_ == "running" do
-		local ready = assert(cqueues.poll(socket_pollable, self.stopping_cond_))
-		-- * Since we exit the loop immediately if self.stopping_cond_ is signalled,
-		--   it's okay to compare ready only with socket_pollable.
-		if ready == socket_pollable then
-			-- * self.client_socket_ is in "tl" mode by default; read a line.
-			local line_without_crlf, err = self.client_socket_:read()
-			if line_without_crlf then
-				local command, params, prefix = self:parse_line_(line_without_crlf)
-				if command then
-					self.last_prefix_ = prefix or false
-					self:pre_handler_(command)
-					local handler = self["handle_" .. command .. "_"]
-					if handler then
-						handler(self, unpack(params))
-					else
-						local quoted_params = {}
-						for ix = 1, #params do
-							table.insert(quoted_params, ("%q"):format(params[ix]))
-						end
-						self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
-					end
-					self:post_handler_(command)
-				end
-			else
-				self:stop_("read failed: " .. tostring(err))
-			end
-		end
-	end
+	self:call_hook_("self_nick", self.raw_nick_, self.nick_)
 end
 
 function client_i:assert_chat_phase_()
@@ -879,7 +941,9 @@ local function make_client(params_in)
 		isupport_tokens_ = {},
 		lusers_ = {},
 		welcome_ = {},
-		effective_casemapping_ = "rfc1459-strict",
+		last_prefix_ = {},
+		channels_ = {},
+		casemapping_ = "rfc1459-strict",
 	}, client_m)
 	client.nick_ = client:lower(client.raw_nick_)
 	return client
