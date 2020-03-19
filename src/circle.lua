@@ -40,6 +40,14 @@ end
 local client_i = {}
 local client_m = { __index = client_i }
 
+function client_i:get_lusers()
+	return self.lusers_
+end
+
+function client_i:get_isupport_tokens()
+	return self.isupport_tokens_
+end
+
 function client_i:get_death_reason()
 	return self.death_reason_
 end
@@ -140,7 +148,7 @@ function client_i:warn_incoming_(message)
 	print(message)
 end
 
-function client_i:handle_001_(welcome)
+function client_i:handle_001_(welcome) -- * RPL_WELCOME
 	if self.registered_ then
 		self:warn_incoming_("001 when already registered")
 		return
@@ -150,9 +158,10 @@ function client_i:handle_001_(welcome)
 		return
 	end
 	self.welcome_.welcome = welcome
+	self.expecting_welcome_ = "002"
 end
 
-function client_i:handle_002_(yourhost)
+function client_i:handle_002_(yourhost) -- * RPL_YOURHOST
 	if self.registered_ then
 		self:warn_incoming_("002 when already registered")
 		return
@@ -162,9 +171,10 @@ function client_i:handle_002_(yourhost)
 		return
 	end
 	self.welcome_.yourhost = yourhost
+	self.expecting_welcome_ = "003"
 end
 
-function client_i:handle_003_(created)
+function client_i:handle_003_(created) -- * RPL_CREATED
 	if self.registered_ then
 		self:warn_incoming_("003 when already registered")
 		return
@@ -174,9 +184,10 @@ function client_i:handle_003_(created)
 		return
 	end
 	self.welcome_.created = created
+	self.expecting_welcome_ = "004"
 end
 
-function client_i:handle_004_(server_name, server_version, user_modes, channel_modes)
+function client_i:handle_004_(server_name, server_version, user_modes, channel_modes) -- * RPL_MYINFO
 	if self.registered_ then
 		self:warn_incoming_("004 when already registered")
 		return
@@ -202,10 +213,108 @@ function client_i:handle_004_(server_name, server_version, user_modes, channel_m
 	self.welcome_.user_modes = user_modes
 	self.welcome_.channel_modes = channel_modes
 	self.registered_ = true
+	self.expecting_welcome_ = nil
+	self.expecting_isupport_ = "005"
 	self:call_hook_("register", self.welcome_)
 end
 
-function client_i:handle_372_(motd_line)
+function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
+	if not self.expecting_isupport_ then
+		self:warn_incoming_("005 when ISUPPORT tokens already received")
+		return
+	end
+	if not client then
+		self:warn_incoming_("005 with no client specified")
+		return
+	end
+	local tokens = { ... }
+	if #tokens == 0 then
+		self:warn_incoming_("005 with no tokens specified")
+		return
+	end
+	if #tokens == 1 then
+		self:warn_incoming_("005 matching format of legacy RPL_BOUNCE")
+		self.compat_flags_.no_isupport = true
+		self:stop_("bounced: " .. tokens[1])
+		return
+	end
+	for ix = 1, #tokens - 1 do -- * Last parameter is just a dummy.
+		local parameter = tokens[ix]
+		local value
+		local erase = false
+		if parameter:find("^%-") then
+			parameter = parameter:sub(2)
+			erase = true
+		elseif parameter:find("=") then
+			parameter, value = parameter:match("^([^=]*)=(.*)$")
+		end
+		local ok = true
+		if not parameter:find("^[A-Z0-9]+$") or #parameter > 20 then
+			self:warn_incoming_("005 token #" .. ix .. ": invalid parameter")
+			ok = false
+		end
+		if value and not value:find("^[A-Za-z0-9!-/:-@[-`{-~]*$") then
+			self:warn_incoming_("005 token #" .. ix .. ": invalid value")
+			ok = false
+		end
+		if erase and value then
+			self:warn_incoming_("005 token #" .. ix .. ": value specified despite erasure")
+			ok = false
+		end
+		if ok then
+			if erase then
+				self.isupport_tokens_[parameter] = nil
+			else
+				self.isupport_tokens_[parameter] = value or true
+			end
+		end
+	end
+end
+
+function client_i:handle_010_(...) -- * RPL_BOUNCE
+	self:stop_("bounced: " .. table.concat({ ... }, " "))
+end
+
+function client_i:handle_250_(...) -- * RPL_STATSDLINE, RPL_STATSCONN
+	self:call_hook_("250", ...) -- * May be useful to some.
+end
+
+function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
+	self.lusers_.client = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_252_(client, ...) -- * RPL_LUSEROP
+	self.lusers_.op = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_253_(client, ...) -- * RPL_LUSERUNKNOWN
+	self.lusers_.unknown = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_254_(client, ...) -- * RPL_LUSERCHANNELS
+	self.lusers_.channels = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_255_(client, ...) -- * RPL_LUSERME
+	self.lusers_.me = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
+	self.lusers_.loc = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
+	self.lusers_.glob = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_372_(motd_line) -- * RPL_MOTD
 	if not self.receiving_motd_ then
 		self:warn_incoming_("372 while not receiving motd")
 		return
@@ -217,21 +326,35 @@ function client_i:handle_372_(motd_line)
 	table.insert(self.motd_, motd_line)
 end
 
-function client_i:handle_375_()
+function client_i:handle_375_() -- * RPL_MOTDSTART
+	if not self.expecting_motd_ then
+		self:warn_incoming_("375 while not expecting motd")
+		return
+	end
 	if self.receiving_motd_ then
 		self:warn_incoming_("375 while already receiving motd")
 		return
 	end
 	self.receiving_motd_ = true
+	self.expecting_motd_ = nil
 	self.motd_ = {}
 end
 
-function client_i:handle_376_()
+function client_i:handle_376_() -- * RPL_ENDOFMOTD
 	if not self.receiving_motd_ then
 		self:warn_incoming_("376 while not receiving motd")
 		return
 	end
-	self.receiving_motd_ = false
+	self.receiving_motd_ = nil
+end
+
+function client_i:handle_422_() -- * ERR_NOMOTD
+	if not self.expecting_motd_ then
+		self:warn_incoming_("422 while not expecting motd")
+		return
+	end
+	self.expecting_motd_ = nil
+	self.motd_ = false
 end
 
 function client_i:handle_nick_(new)
@@ -257,6 +380,29 @@ function client_i:handle_ping_(server, server2)
 	self:send_("pong", { server, server2 })
 end
 
+function client_i:pre_handler_(command) -- * Used for edge-triggering.
+	if self.expecting_welcome_ and command ~= self.expecting_welcome_ then
+		self:stop_("bad welcome sequence: expected " .. self.expecting_welcome_ .. ", got " .. command)
+		self.expecting_welcome_ = nil
+	end
+	if self.expecting_isupport_ and command ~= self.expecting_isupport_ then
+		self.expecting_isupport_ = nil
+		if not next(self.isupport_tokens_) then
+			self:warn_incoming_("server sent no ISUPPORT tokens")
+			self.compat_flags_.no_isupport = true
+		end
+		self:call_hook_("isupport", self.isupport_tokens_)
+	end
+end
+
+function client_i:post_handler_(command) -- * Used for edge-triggering.
+	if self.receiving_lusers_ and not self.handled_lusers_ then
+		self:call_hook_("lusers", self.lusers_)
+	end
+	self.receiving_lusers_ = self.handled_lusers_
+	self.handled_lusers_ = nil
+end
+
 function client_i:dispatch_()
 	local socket_pollable = { pollfd = self.client_socket_:pollfd(), events = "r" }
 	while self.status_ == "running" do
@@ -270,6 +416,7 @@ function client_i:dispatch_()
 				local command, params, prefix = parse_line(line_without_crlf)
 				if command then
 					self.last_prefix_ = prefix or false
+					self:pre_handler_(command)
 					local handler = self["handle_" .. command .. "_"]
 					if handler then
 						handler(self, unpack(params))
@@ -280,6 +427,7 @@ function client_i:dispatch_()
 						end
 						self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
 					end
+					self:post_handler_(command)
 				end
 			else
 				self:stop_("read failed: " .. tostring(err))
@@ -360,6 +508,7 @@ function client_i:register_()
 	self:send_("pass", {}, self.pass_)
 	self:send_("nick", { self.nick_ })
 	self:send_("user", { self.user_, "0", "*" }, self.real_)
+	self.expecting_welcome_ = "001"
 end
 
 function client_i:connect()
@@ -443,15 +592,13 @@ local function make_client(params_in)
 		tls_ctx_ = params.tls and (assert_param_default(ok_openssl_context, params.tls_ctx, "tls_ctx") or make_tls_context()),
 		queue_ = assert_param_default(ok_cqueues_controller, params.queue, "queue") or cqueues.new(),
 		message_size_limit_ = assert_param_default(ok_integer, params.message_size_limit, "message_size_limit") or 512,
-		last_prefix_ = false,
-		receiving_motd_ = false,
-		death_reason_ = false,
-		connecting_ = false,
-		registered_ = false,
-		motd_ = {},
-		hooks_ = {},
-		welcome_ = {},
 		default_quit_message_ = "quit",
+		expecting_motd_ = true,
+		hooks_ = {},
+		compat_flags_ = {},
+		isupport_tokens_ = {},
+		lusers_ = {},
+		welcome_ = {},
 	}, client_m)
 end
 
