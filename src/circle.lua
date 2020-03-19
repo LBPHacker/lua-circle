@@ -8,8 +8,42 @@ local ssl_pkey = require("openssl.pkey")
 local unpack = rawget(_G, "unpack") or table.unpack
 local bit = rawget(_G, "bit") or rawget(_G, "bit32")
 
+local casemappings = {}
+do
+	local casemappings_init = {
+		["ascii"] = {
+			upper = [==[ABCDEFGHIJKLMNOPQRSTUVWXYZ]==],
+			lower = [==[abcdefghijklmnopqrstuvwxyz]==],
+		},
+		["rfc1459"] = {
+			upper = [==[ABCDEFGHIJKLMNOPQRSTUVWXYZ[]\~]==],
+			lower = [==[abcdefghijklmnopqrstuvwxyz{}|^]==],
+		},
+		["rfc1459-strict"] = {
+			upper = [==[ABCDEFGHIJKLMNOPQRSTUVWXYZ[]\]==],
+			lower = [==[abcdefghijklmnopqrstuvwxyz{}|]==],
+		},
+	}
+	for name, mapping_init in pairs(casemappings_init) do
+		assert(#mapping_init.lower == #mapping_init.upper)
+		local lower = {}
+		local upper = {}
+		for ix = 1, #mapping_init.lower do
+			lower[mapping_init.upper:sub(ix, ix)] = mapping_init.lower:sub(ix, ix)
+			upper[mapping_init.lower:sub(ix, ix)] = mapping_init.upper:sub(ix, ix)
+		end
+		casemappings[name] = {
+			lower = lower,
+			upper = upper,
+		}
+	end
+end
+
 local function ok_nonempty_string(str)
 	return type(str) == "string" and #str > 0
+end
+local function ok_nick(str)
+	return type(str) == "string" and str:find("^[A-Za-z%[%]\\`_^{|}][A-Za-z0-9%[%]\\`_^{|}-]*$")
 end
 local function ok_cqueues_controller(cq)
 	return cqueues.type(cq) == "controller"
@@ -52,6 +86,14 @@ function client_i:get_death_reason()
 	return self.death_reason_
 end
 
+function client_i:get_all_death_reasons()
+	return self.all_death_reasons_
+end
+
+function client_i:get_raw_nick()
+	return self.raw_nick_
+end
+
 function client_i:get_nick()
 	return self.nick_
 end
@@ -64,12 +106,30 @@ function client_i:get_welcome()
 	return self.welcome_
 end
 
-local function parse_prefix(prefix)
-	local nick, user, host = prefix:match("^([^!]*)!([^@]*)@([^@]*)$")
-	return nick, user, host -- * Just so I know what I'm returning.
+function client_i:lower(str)
+	local lower = casemappings[self.effective_casemapping_].lower
+	local out = {}
+	for letter in str:gmatch(".") do
+		table.insert(out, lower[letter] or letter)
+	end
+	return table.concat(out)
 end
 
-local function parse_line(line_without_crlf)
+function client_i:upper(str)
+	local upper = casemappings[self.effective_casemapping_].upper
+	local out = {}
+	for letter in str:gmatch(".") do
+		table.insert(out, upper[letter] or letter)
+	end
+	return table.concat(out)
+end
+
+function client_i:parse_prefix_()
+	local nick, user, host = self.last_prefix_:match("^([^!]*)!([^@]*)@([^@]*)$")
+	return self:lower(nick), user, host
+end
+
+function client_i:parse_line_(line_without_crlf)
 	if line_without_crlf:find("[^\1-\255]") then
 		return
 	end
@@ -150,11 +210,11 @@ end
 
 function client_i:handle_001_(welcome) -- * RPL_WELCOME
 	if self.registered_ then
-		self:warn_incoming_("001 when already registered")
+		self:stop_("001 when already registered")
 		return
 	end
 	if not welcome then
-		self:warn_incoming_("001 with no welcome line")
+		self:stop_("001 with no welcome line")
 		return
 	end
 	self.welcome_.welcome = welcome
@@ -163,11 +223,11 @@ end
 
 function client_i:handle_002_(yourhost) -- * RPL_YOURHOST
 	if self.registered_ then
-		self:warn_incoming_("002 when already registered")
+		self:stop_("002 when already registered")
 		return
 	end
 	if not yourhost then
-		self:warn_incoming_("002 with no yourhost line")
+		self:stop_("002 with no yourhost line")
 		return
 	end
 	self.welcome_.yourhost = yourhost
@@ -176,11 +236,11 @@ end
 
 function client_i:handle_003_(created) -- * RPL_CREATED
 	if self.registered_ then
-		self:warn_incoming_("003 when already registered")
+		self:stop_("003 when already registered")
 		return
 	end
 	if not created then
-		self:warn_incoming_("003 with no created line")
+		self:stop_("003 with no created line")
 		return
 	end
 	self.welcome_.created = created
@@ -189,23 +249,23 @@ end
 
 function client_i:handle_004_(server_name, server_version, user_modes, channel_modes) -- * RPL_MYINFO
 	if self.registered_ then
-		self:warn_incoming_("004 when already registered")
+		self:stop_("004 when already registered")
 		return
 	end
 	if not server_name then
-		self:warn_incoming_("004 with no server name specified")
+		self:stop_("004 with no server name specified")
 		return
 	end
 	if not server_version then
-		self:warn_incoming_("004 with no server version specified")
+		self:stop_("004 with no server version specified")
 		return
 	end
 	if not user_modes then
-		self:warn_incoming_("004 with no user modes specified")
+		self:stop_("004 with no user modes specified")
 		return
 	end
 	if not channel_modes then
-		self:warn_incoming_("004 with no channel modes specified")
+		self:stop_("004 with no channel modes specified")
 		return
 	end
 	self.welcome_.server_name = server_name
@@ -220,16 +280,17 @@ end
 
 function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
 	if not self.expecting_isupport_ then
+		-- * TODO: handle these, stop when casemapping randomly changes, etc.
 		self:warn_incoming_("005 when ISUPPORT tokens already received")
 		return
 	end
 	if not client then
-		self:warn_incoming_("005 with no client specified")
+		self:stop_("005 with no client specified")
 		return
 	end
 	local tokens = { ... }
 	if #tokens == 0 then
-		self:warn_incoming_("005 with no tokens specified")
+		self:stop_("005 with no tokens specified")
 		return
 	end
 	if #tokens == 1 then
@@ -250,15 +311,15 @@ function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
 		end
 		local ok = true
 		if not parameter:find("^[A-Z0-9]+$") or #parameter > 20 then
-			self:warn_incoming_("005 token #" .. ix .. ": invalid parameter")
+			self:stop_("005 token #" .. ix .. ": invalid parameter")
 			ok = false
 		end
 		if value and not value:find("^[A-Za-z0-9!-/:-@[-`{-~]*$") then
-			self:warn_incoming_("005 token #" .. ix .. ": invalid value")
+			self:stop_("005 token #" .. ix .. ": invalid value")
 			ok = false
 		end
 		if erase and value then
-			self:warn_incoming_("005 token #" .. ix .. ": value specified despite erasure")
+			self:stop_("005 token #" .. ix .. ": value specified despite erasure")
 			ok = false
 		end
 		if ok then
@@ -302,6 +363,71 @@ end
 function client_i:handle_255_(client, ...) -- * RPL_LUSERME
 	self.lusers_.me = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
+end
+
+function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
+	if self.setting_nick_ then
+		self.set_nick_error_ = 432
+		self.setting_nick_:signal()
+		self.setting_nick_ = nil
+	else
+		self:warn_incoming_("432 while not setting nick")
+	end
+end
+
+function client_i:handle_433_(command) -- * ERR_NICKNAMEINUSE
+	if self.setting_nick_ then
+		self.set_nick_error_ = 433
+		self.setting_nick_:signal()
+		self.setting_nick_ = nil
+	else
+		self:warn_incoming_("433 while not setting nick")
+	end
+end
+
+function client_i:handle_436_(command) -- * ERR_NICKCOLLISION
+	self:stop_("nick collision")
+end
+
+function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
+	if ok_nick(nick_or_channel) then
+		-- * Assume it's a nick.
+		if self.setting_nick_ then
+			self.set_nick_error_ = 437
+			self.setting_nick_:signal()
+			self.setting_nick_ = nil
+		else
+			self:warn_incoming_("437 while not setting nick")
+		end
+	else
+		-- * Assume it's a channel.
+		-- * TODO: handle the channel case
+	end
+end
+
+function client_i:handle_484_() -- * ERR_RESTRICTED
+	-- * TODO: handle other cases
+	if self.setting_nick_ then
+		self.set_nick_error_ = 484
+		self.setting_nick_:signal()
+		self.setting_nick_ = nil
+	else
+		self:warn_incoming_("484 while not setting nick")
+	end
+end
+
+function client_i:handle_263_(command) -- * RPL_TRYAGAIN
+	if command == "nick" then
+		if self.setting_nick_ then
+			self.set_nick_error_ = 263
+			self.setting_nick_:signal()
+			self.setting_nick_ = nil
+		else
+			self:warn_incoming_("263 to nick while not setting nick")
+		end
+	else
+		self:warn_incoming_("263 to " .. command)
+	end
 end
 
 function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
@@ -357,27 +483,82 @@ function client_i:handle_422_() -- * ERR_NOMOTD
 	self.motd_ = false
 end
 
+do
+	local error_messages = {
+		[263] = "rate-limited",
+		[432] = "erroneous nick",
+		[433] = "nick already in use",
+		[437] = "nick temporarily unavailable",
+		[484] = "connection restricted",
+	}
+	function client_i:set_nick(new_in)
+		self:assert_chat_phase_()
+		if self.setting_nick_ then
+			error("already setting nick", 2)
+		end
+		local new = assert_param(ok_nick, new_in, "nick")
+		if self.raw_nick_ == new then
+			return true
+		end
+		self.setting_nick_ = condition.new()
+		self:send_("nick", { new })
+		self.setting_nick_:wait() -- * self.setting_nick_ gets nil'd by the time this returns.
+		local set_nick_error = self.set_nick_error_
+		self.set_nick_error_ = nil
+		if set_nick_error then
+			return nil, error_messages[set_nick_error], set_nick_error
+		end
+		return true
+	end
+end
+
+function client_i:update_nick_(new)
+	self.raw_nick_ = new
+	self.nick_ = self:lower(new)
+end
+
 function client_i:handle_nick_(new)
-	local old = parse_prefix(self.last_prefix_)
+	local old = self:parse_prefix_()
 	if not old then
-		self:warn_incoming_("nick with no nickname specified in prefix")
+		self:stop_("nick with no nickname specified in prefix")
 		return
 	end
 	if not new then
-		self:warn_incoming_("nick with no new nickname specified")
+		self:stop_("nick with no new nickname specified")
 		return
 	end
-	if old == self.nick_ then
-		self.nick_ = new
+	if self:lower(old) == self.nick_ then
+		self:update_nick_(new)
+	end
+	if self.setting_nick_ then
+		self.setting_nick_:signal()
+		self.setting_nick_ = nil
 	end
 end
 
 function client_i:handle_ping_(server, server2)
 	if not server then
-		self:warn_incoming_("ping with no server specified")
+		self:stop_("ping with no server specified")
 		return
 	end
 	self:send_("pong", { server, server2 })
+end
+
+function client_i:process_isupport_()
+	if self.isupport_tokens_.CASEMAPPING then
+		if not casemappings[self.isupport_tokens_.CASEMAPPING] then
+			self:stop_("unknown casemapping " .. self.isupport_tokens_.CASEMAPPING)
+			return
+		end
+		local old_nick = self.nick_
+		self.effective_casemapping_ = self.isupport_tokens_.CASEMAPPING
+		if self:lower(self.raw_nick_) ~= old_nick then
+			self:update_nick_(self.raw_nick_)
+		end
+	else
+		self:warn_incoming_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.effective_casemapping_)
+	end
+	self:call_hook_("isupport", self.isupport_tokens_)
 end
 
 function client_i:pre_handler_(command) -- * Used for edge-triggering.
@@ -388,10 +569,11 @@ function client_i:pre_handler_(command) -- * Used for edge-triggering.
 	if self.expecting_isupport_ and command ~= self.expecting_isupport_ then
 		self.expecting_isupport_ = nil
 		if not next(self.isupport_tokens_) then
+			-- * TODO: handle this somehow
 			self:warn_incoming_("server sent no ISUPPORT tokens")
 			self.compat_flags_.no_isupport = true
 		end
-		self:call_hook_("isupport", self.isupport_tokens_)
+		self:process_isupport_()
 	end
 end
 
@@ -413,7 +595,7 @@ function client_i:dispatch_()
 			-- * self.client_socket_ is in "tl" mode by default; read a line.
 			local line_without_crlf, err = self.client_socket_:read()
 			if line_without_crlf then
-				local command, params, prefix = parse_line(line_without_crlf)
+				local command, params, prefix = self:parse_line_(line_without_crlf)
 				if command then
 					self.last_prefix_ = prefix or false
 					self:pre_handler_(command)
@@ -465,6 +647,12 @@ function client_i:quit(message_in)
 end
 
 function client_i:stop_(death_reason)
+	if death_reason then
+		if not self.all_death_reasons_ then
+			self.all_death_reasons_ = {}
+		end
+		table.insert(self.all_death_reasons_, death_reason)
+	end
 	if self.status_ ~= "dead" then
 		self:call_hook_("stop", death_reason)
 		self.status_ = "dead"
@@ -506,7 +694,7 @@ end
 
 function client_i:register_()
 	self:send_("pass", {}, self.pass_)
-	self:send_("nick", { self.nick_ })
+	self:send_("nick", { self.raw_nick_ })
 	self:send_("user", { self.user_, "0", "*" }, self.real_)
 	self.expecting_welcome_ = "001"
 end
@@ -580,11 +768,11 @@ end
 
 local function make_client(params_in)
 	local params = assert_param(ok_table, params_in, "params")
-	return setmetatable({
+	local client = setmetatable({
 		host_ = assert_param(ok_nonempty_string, params.host, "host"),
 		port_ = assert_param(ok_integer, params.port, "port"),
 		user_ = assert_param(ok_nonempty_string, params.user, "user"),
-		nick_ = assert_param(ok_nonempty_string, params.nick, "nick"),
+		raw_nick_ = assert_param(ok_nonempty_string, params.nick, "nick"),
 		pass_ = assert_param(ok_nonempty_string, params.pass, "pass"),
 		real_ = assert_param(ok_nonempty_string, params.real, "real"),
 		status_ = "ready",
@@ -599,7 +787,10 @@ local function make_client(params_in)
 		isupport_tokens_ = {},
 		lusers_ = {},
 		welcome_ = {},
+		effective_casemapping_ = "rfc1459-strict",
 	}, client_m)
+	client.nick_ = client:lower(client.raw_nick_)
+	return client
 end
 
 return {
