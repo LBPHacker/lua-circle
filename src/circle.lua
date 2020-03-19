@@ -1076,7 +1076,6 @@ function client_i:register_()
 	self:send_("pass", {}, self.pass_)
 	self:send_("nick", { self.raw_nick_ })
 	self:send_("user", { self.user_, "0", "*" }, self.real_)
-	self.expecting_welcome_ = "001"
 end
 
 function client_i:connect()

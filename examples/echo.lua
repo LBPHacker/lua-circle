@@ -1,6 +1,6 @@
 #!/usr/bin/env lua5.3
 
-local my_config = require("my_config") -- should be a table with .host, .port, .user and .pass
+local my_config = require("my_config")
 local circle = require("circle")
 local cqueues = require("cqueues")
 local condition = require("cqueues.condition")
@@ -11,16 +11,17 @@ math.randomseed(os.time())
 local client = circle.client({
 	host = my_config.host,
 	port = my_config.port,
+	nick = my_config.nick,
+	real = my_config.real,
 	user = my_config.user,
 	pass = my_config.pass,
-	nick = "lua-circle-" .. math.random(10000, 99999),
-	real = "lua-circle echo example",
 	tls = true,
 	queue = queue
 })
 
 local shutdown_cond = condition.new()
 client:hook("stop", function(self, death_reason)
+	print(death_reason)
 	shutdown_cond:signal()
 end)
 
