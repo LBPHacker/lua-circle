@@ -221,6 +221,12 @@ function client_i:privmsg(target_in, message_in)
 	self:send_("privmsg", { target }, message)
 end
 
+function client_i:notice(target_in, message_in)
+	local target = assert_param(ok_nonempty_string, target_in, "target")
+	local message = assert_param(ok_string, message_in, "message")
+	self:send_("notice", { target }, message)
+end
+
 function client_i:quit(message_in)
 	local message = assert_param_default(ok_string, message_in, "message") or self.default_quit_message_
 	self:send_("quit", {}, message)
