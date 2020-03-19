@@ -74,8 +74,18 @@ end
 local client_i = {}
 local client_m = { __index = client_i }
 
+local function handle_by_hook(command)
+	client_i["handle_" .. command .. "_"] = function(self, ...)
+		self:call_hook_(command, ...)
+	end
+end
+
 function client_i:get_lusers()
 	return self.lusers_
+end
+
+function client_i:get_away()
+	return self.away_
 end
 
 function client_i:get_isupport_tokens()
@@ -336,9 +346,8 @@ function client_i:handle_010_(...) -- * RPL_BOUNCE
 	self:stop_("bounced: " .. table.concat({ ... }, " "))
 end
 
-function client_i:handle_250_(...) -- * RPL_STATSDLINE, RPL_STATSCONN
-	self:call_hook_("250", ...) -- * May be useful to some.
-end
+handle_by_hook("250") -- * RPL_STATSDLINE, RPL_STATSCONN
+handle_by_hook("301") -- * RPL_AWAY
 
 function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
 	self.lusers_.client = table.concat({ ... }, " ")
@@ -363,6 +372,108 @@ end
 function client_i:handle_255_(client, ...) -- * RPL_LUSERME
 	self.lusers_.me = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
+end
+
+function client_i:handle_263_(command) -- * RPL_TRYAGAIN
+	if command == "nick" then
+		if self.setting_nick_ then
+			self.set_nick_error_ = 263
+			self.setting_nick_:signal()
+			self.setting_nick_ = nil
+		else
+			self:warn_incoming_("263 to nick while not setting nick")
+		end
+	elseif command == "away" then
+		if self.setting_away_ then
+			self.set_away_error_ = 263
+			self.setting_away_:signal()
+			self.setting_away_ = nil
+		else
+			self:warn_incoming_("263 to away while not setting away")
+		end
+	else
+		self:warn_incoming_("263 to " .. command)
+	end
+end
+
+function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
+	self.lusers_.loc = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
+	self.lusers_.glob = table.concat({ ... }, " ")
+	self.handled_lusers_ = true
+end
+
+function client_i:handle_305_() -- * RPL_UNAWAY
+	if self.away_ then
+		self.away_ = nil
+		self:call_hook_("unaway")
+	else
+		self:warn_incoming_("305 while not away")
+	end
+	if self.setting_away_ then
+		self.setting_away_:signal()
+		self.setting_away_ = nil
+	end
+end
+
+function client_i:handle_306_() -- * RPL_NOWAWAY
+	if self.away_ then
+		self:warn_incoming_("306 while away")
+	else
+		self.away_ = self.away_message_sent_
+		self.away_message_sent_ = nil
+		self:call_hook_("away")
+	end
+	if self.setting_away_ then
+		self.setting_away_:signal()
+		self.setting_away_ = nil
+	end
+end
+
+function client_i:handle_372_(motd_line) -- * RPL_MOTD
+	if not self.receiving_motd_ then
+		self:warn_incoming_("372 while not receiving motd")
+		return
+	end
+	if not motd_line then
+		self:warn_incoming_("372 with no motd line")
+		return
+	end
+	table.insert(self.motd_, motd_line)
+end
+
+function client_i:handle_375_() -- * RPL_MOTDSTART
+	if not self.expecting_motd_ then
+		self:warn_incoming_("375 while not expecting motd")
+		return
+	end
+	if self.receiving_motd_ then
+		self:warn_incoming_("375 while already receiving motd")
+		return
+	end
+	self.receiving_motd_ = true
+	self.expecting_motd_ = nil
+	self.motd_ = {}
+end
+
+function client_i:handle_376_() -- * RPL_ENDOFMOTD
+	if not self.receiving_motd_ then
+		self:warn_incoming_("376 while not receiving motd")
+		return
+	end
+	self.receiving_motd_ = nil
+end
+
+function client_i:handle_422_() -- * ERR_NOMOTD
+	if not self.expecting_motd_ then
+		self:warn_incoming_("422 while not expecting motd")
+		return
+	end
+	self.expecting_motd_ = nil
+	self.motd_ = false
 end
 
 function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
@@ -416,73 +527,6 @@ function client_i:handle_484_() -- * ERR_RESTRICTED
 	end
 end
 
-function client_i:handle_263_(command) -- * RPL_TRYAGAIN
-	if command == "nick" then
-		if self.setting_nick_ then
-			self.set_nick_error_ = 263
-			self.setting_nick_:signal()
-			self.setting_nick_ = nil
-		else
-			self:warn_incoming_("263 to nick while not setting nick")
-		end
-	else
-		self:warn_incoming_("263 to " .. command)
-	end
-end
-
-function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
-	self.lusers_.loc = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
-end
-
-function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
-	self.lusers_.glob = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
-end
-
-function client_i:handle_372_(motd_line) -- * RPL_MOTD
-	if not self.receiving_motd_ then
-		self:warn_incoming_("372 while not receiving motd")
-		return
-	end
-	if not motd_line then
-		self:warn_incoming_("372 with no motd line")
-		return
-	end
-	table.insert(self.motd_, motd_line)
-end
-
-function client_i:handle_375_() -- * RPL_MOTDSTART
-	if not self.expecting_motd_ then
-		self:warn_incoming_("375 while not expecting motd")
-		return
-	end
-	if self.receiving_motd_ then
-		self:warn_incoming_("375 while already receiving motd")
-		return
-	end
-	self.receiving_motd_ = true
-	self.expecting_motd_ = nil
-	self.motd_ = {}
-end
-
-function client_i:handle_376_() -- * RPL_ENDOFMOTD
-	if not self.receiving_motd_ then
-		self:warn_incoming_("376 while not receiving motd")
-		return
-	end
-	self.receiving_motd_ = nil
-end
-
-function client_i:handle_422_() -- * ERR_NOMOTD
-	if not self.expecting_motd_ then
-		self:warn_incoming_("422 while not expecting motd")
-		return
-	end
-	self.expecting_motd_ = nil
-	self.motd_ = false
-end
-
 do
 	local error_messages = {
 		[263] = "rate-limited",
@@ -491,6 +535,7 @@ do
 		[437] = "nick temporarily unavailable",
 		[484] = "connection restricted",
 	}
+
 	function client_i:set_nick(new_in)
 		self:assert_chat_phase_()
 		if self.setting_nick_ then
@@ -507,6 +552,52 @@ do
 		self.set_nick_error_ = nil
 		if set_nick_error then
 			return nil, error_messages[set_nick_error], set_nick_error
+		end
+		return true
+	end
+end
+
+do
+	local error_messages = {
+		[263] = "rate-limited",
+	}
+
+	function client_i:set_away(message_in)
+		self:assert_chat_phase_()
+		if self.setting_away_ then
+			error("already setting away", 2)
+		end
+		local message = assert_param_default(ok_string, message_in, "message") or self.default_away_message_
+		if message == self.away_ then
+			return true
+		end
+		self.setting_away_ = condition.new()
+		self.away_message_sent_ = message
+		self:send_("away", {}, message)
+		self.setting_away_:wait() -- * self.setting_away_ gets nil'd by the time this returns.
+		local set_away_error = self.set_away_error_
+		self.set_away_error_ = nil
+		if set_away_error then
+			return nil, error_messages[set_away_error], set_away_error
+		end
+		return true
+	end
+
+	function client_i:unset_away()
+		if not self.away_ then
+			return true
+		end
+		self:assert_chat_phase_()
+		if self.setting_away_ then
+			error("already setting away", 2)
+		end
+		self.setting_away_ = condition.new()
+		self:send_("away", {})
+		self.setting_away_:wait() -- * self.setting_away_ gets nil'd by the time this returns.
+		local set_away_error = self.set_away_error_
+		self.set_away_error_ = nil
+		if set_away_error then
+			return nil, error_messages[set_away_error], set_away_error
 		end
 		return true
 	end
@@ -781,6 +872,7 @@ local function make_client(params_in)
 		queue_ = assert_param_default(ok_cqueues_controller, params.queue, "queue") or cqueues.new(),
 		message_size_limit_ = assert_param_default(ok_integer, params.message_size_limit, "message_size_limit") or 512,
 		default_quit_message_ = "quit",
+		default_away_message_ = "away",
 		expecting_motd_ = true,
 		hooks_ = {},
 		compat_flags_ = {},
