@@ -29,8 +29,7 @@ queue:wrap(function()
 
 	local stdin_pollable = { pollfd = 0, events = "r" }
 	local func_env = setmetatable({ client = client }, { __index = _ENV })
-	local running = true
-	while running and client:get_status() == "running" do
+	while client:get_status() == "running" do
 		io.write("> ")
 		io.flush()
 		local ready = { assert(cqueues.poll(stdin_pollable, shutdown_cond)) }
@@ -50,8 +49,6 @@ queue:wrap(function()
 				else
 					client:quit()
 				end
-			elseif ready[ix] == shutdown_cond then
-				running = false
 			end
 		end
 	end
