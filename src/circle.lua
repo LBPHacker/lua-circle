@@ -186,6 +186,16 @@ function client_i:dispatch_()
 	end
 end
 
+function client_i:privmsg(target, message)
+	if type(target) ~= "string" then
+		error("target must be a string", 2)
+	end
+	if type(message) ~= "string" then
+		error("message must be a string", 2)
+	end
+	self:send_("privmsg", { target }, message)
+end
+
 function client_i:quit(message)
 	if message then
 		if type(message) ~= "string" then
@@ -346,7 +356,7 @@ local function make_client(params)
 		connecting_ = false,
 		motd_ = {},
 		hooks_ = {},
-		default_quit_message_ = "bye",
+		default_quit_message_ = "quit",
 	}, client_m)
 	return client
 end
