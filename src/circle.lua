@@ -8,6 +8,32 @@ local ssl_pkey = require("openssl.pkey")
 local unpack = rawget(_G, "unpack") or table.unpack
 local bit = rawget(_G, "bit") or rawget(_G, "bit32")
 
+local function ok_nonempty_string(str)
+	return type(str) == "string" and #str > 0
+end
+local function ok_cqueues_controller(cq)
+	return cqueues.type(cq) == "controller"
+end
+local function ok_openssl_context(ctx)
+	-- * TODO: find a good way to check this... openssl.ssl.context.type doesn't exist.
+	return type(ctx) == "userdata"
+end
+local function ok_integer(num)
+	return type(num) == "number" and math.floor(num) == num
+end
+local function ok_string(str)
+	return type(str) == "string"
+end
+local function ok_function(func)
+	return type(func) == "function"
+end
+local function assert_param(ok, thing, name)
+	return ok(thing) and thing or error("invalid " .. name, 3)
+end
+local function assert_param_default(ok, thing, name)
+	return thing and (ok(thing) and thing or error("invalid " .. name, 3)) or nil
+end
+
 local client_i = {}
 local client_m = { __index = client_i }
 
@@ -186,24 +212,14 @@ function client_i:dispatch_()
 	end
 end
 
-function client_i:privmsg(target, message)
-	if type(target) ~= "string" then
-		error("target must be a string", 2)
-	end
-	if type(message) ~= "string" then
-		error("message must be a string", 2)
-	end
+function client_i:privmsg(target_in, message_in)
+	local target = assert_param(ok_nonempty_string, target_in, "target")
+	local message = assert_param(ok_string, message_in, "message")
 	self:send_("privmsg", { target }, message)
 end
 
-function client_i:quit(message)
-	if message then
-		if type(message) ~= "string" then
-			error("message must be a string", 2)
-		end
-	else
-		message = self.default_quit_message_
-	end
+function client_i:quit(message_in)
+	local message = assert_param_default(ok_string, message_in, "message") or self.default_quit_message_
 	self:send_("quit", {}, message)
 end
 
@@ -216,20 +232,18 @@ function client_i:stop_(death_reason)
 	end
 end
 
-function client_i:hook(name, func)
-	if type(func) ~= "function" then
-		error("hook must be a function", 2)
-	end
+function client_i:hook(name_in, func_in)
+	local name = assert_param(ok_string, name_in, "name")
+	local func = assert_param(ok_function, func_in, "func")
 	if not self.hooks_[name] then
 		self.hooks_[name] = {}
 	end
 	self.hooks_[name][func] = true
 end
 
-function client_i:unhook(name, ...)
-	if type(func) ~= "function" then
-		error("hook must be a function", 2)
-	end
+function client_i:unhook(name_in, func_in)
+	local name = assert_param(ok_string, name_in, "name")
+	local func = assert_param(ok_function, func_in, "func")
 	self.hooks_[name][func] = nil
 	if not next(self.hooks_[name]) then
 		self.hooks_[name] = nil
@@ -317,39 +331,18 @@ local function make_tls_context()
 end
 
 local function make_client(params)
-	local function ok_nonempty_string(str)
-		return type(str) == "string" and #str > 0
-	end
-	local function ok_cqueues_controller(cq)
-		return cqueues.type(cq) == "controller"
-	end
-	local function ok_openssl_context(ctx)
-		-- * TODO: find a good way to check this... openssl.ssl.context.type doesn't exist.
-		return type(ctx) == "userdata"
-	end
-	local function ok_integer(num)
-		return type(num) == "number" and math.floor(num) == num
-	end
-	local function assert_param(ok, name)
-		local thing = params[name]
-		return ok(thing) and thing or error("invalid ." .. name, 3)
-	end
-	local function assert_param_default(ok, name)
-		local thing = params[name]
-		return thing and (ok(thing) and thing or error("invalid ." .. name, 3)) or nil
-	end
 	local client = setmetatable({
-		host_ = assert_param(ok_nonempty_string, "host"),
-		port_ = assert_param(ok_integer, "port"),
-		user_ = assert_param(ok_nonempty_string, "user"),
-		nick_ = assert_param(ok_nonempty_string, "nick"),
-		pass_ = assert_param(ok_nonempty_string, "pass"),
-		real_ = assert_param(ok_nonempty_string, "real"),
+		host_ = assert_param(ok_nonempty_string, params.host, "host"),
+		port_ = assert_param(ok_integer, params.port, "port"),
+		user_ = assert_param(ok_nonempty_string, params.user, "user"),
+		nick_ = assert_param(ok_nonempty_string, params.nick, "nick"),
+		pass_ = assert_param(ok_nonempty_string, params.pass, "pass"),
+		real_ = assert_param(ok_nonempty_string, params.real, "real"),
 		status_ = "ready",
 		use_tls_ = params.tls and true or false,
-		tls_ctx_ = params.tls and (assert_param_default(ok_openssl_context, "tls_ctx") or make_tls_context()),
-		queue_ = assert_param_default(ok_cqueues_controller, "queue") or cqueues.new(),
-		message_size_limit_ = assert_param_default(ok_integer, "message_size_limit") or 512,
+		tls_ctx_ = params.tls and (assert_param_default(ok_openssl_context, params.tls_ctx, "tls_ctx") or make_tls_context()),
+		queue_ = assert_param_default(ok_cqueues_controller, params.queue, "queue") or cqueues.new(),
+		message_size_limit_ = assert_param_default(ok_integer, params.message_size_limit, "message_size_limit") or 512,
 		last_prefix_ = false,
 		receiving_motd_ = false,
 		death_reason_ = false,
