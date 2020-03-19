@@ -21,6 +21,9 @@ end
 local function ok_integer(num)
 	return type(num) == "number" and math.floor(num) == num
 end
+local function ok_table(tbl)
+	return type(tbl) == "table"
+end
 local function ok_string(str)
 	return type(str) == "string"
 end
@@ -263,6 +266,12 @@ function client_i:disconnect_()
 	self.client_socket_:close()
 end
 
+function client_i:register_()
+	self:send_("pass", {}, self.pass_)
+	self:send_("nick", { self.nick_ })
+	self:send_("user", { self.user_, "0", "*" }, self.real_)
+end
+
 function client_i:connect()
 	assert(self.status_ == "ready", "status ~= ready")
 	self.status_ = "running"
@@ -290,11 +299,11 @@ function client_i:connect()
 			return false
 		end
 	end
+	self.connecting_ = false
 	self.queue_:wrap(function()
-		self.connecting_ = false
-		self:send_("pass", {}, self.pass_)
-		self:send_("nick", { self.nick_ })
-		self:send_("user", { self.user_, "0", "*" }, self.real_)
+		self:register_()
+	end)
+	self.queue_:wrap(function()
 		self:dispatch_()
 		self:disconnect_()
 	end)
@@ -330,8 +339,9 @@ local function make_tls_context()
 	return ctx
 end
 
-local function make_client(params)
-	local client = setmetatable({
+local function make_client(params_in)
+	local params = assert_param(ok_table, params_in, "params")
+	return setmetatable({
 		host_ = assert_param(ok_nonempty_string, params.host, "host"),
 		port_ = assert_param(ok_integer, params.port, "port"),
 		user_ = assert_param(ok_nonempty_string, params.user, "user"),
@@ -351,7 +361,6 @@ local function make_client(params)
 		hooks_ = {},
 		default_quit_message_ = "quit",
 	}, client_m)
-	return client
 end
 
 return {

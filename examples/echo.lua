@@ -24,8 +24,9 @@ client:hook("stop", function(self, death_reason)
 	shutdown_cond:signal()
 end)
 
-client:connect()
 queue:wrap(function()
+	client:connect()
+
 	local stdin_pollable = { pollfd = 0, events = "r" }
 	local func_env = setmetatable({ client = client }, { __index = _ENV })
 	local running = true
