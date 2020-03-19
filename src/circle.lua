@@ -52,6 +52,10 @@ function client_i:get_status()
 	return self.status_
 end
 
+function client_i:get_welcome()
+	return self.welcome_
+end
+
 local function parse_prefix(prefix)
 	local nick, user, host = prefix:match("^([^!]*)!([^@]*)@([^@]*)$")
 	return nick, user, host -- * Just so I know what I'm returning.
@@ -136,13 +140,78 @@ function client_i:warn_incoming_(message)
 	print(message)
 end
 
+function client_i:handle_001_(welcome)
+	if self.registered_ then
+		self:warn_incoming_("001 when already registered")
+		return
+	end
+	if not welcome then
+		self:warn_incoming_("001 with no welcome line")
+		return
+	end
+	self.welcome_.welcome = welcome
+end
+
+function client_i:handle_002_(yourhost)
+	if self.registered_ then
+		self:warn_incoming_("002 when already registered")
+		return
+	end
+	if not yourhost then
+		self:warn_incoming_("002 with no yourhost line")
+		return
+	end
+	self.welcome_.yourhost = yourhost
+end
+
+function client_i:handle_003_(created)
+	if self.registered_ then
+		self:warn_incoming_("003 when already registered")
+		return
+	end
+	if not created then
+		self:warn_incoming_("003 with no created line")
+		return
+	end
+	self.welcome_.created = created
+end
+
+function client_i:handle_004_(server_name, server_version, user_modes, channel_modes)
+	if self.registered_ then
+		self:warn_incoming_("004 when already registered")
+		return
+	end
+	if not server_name then
+		self:warn_incoming_("004 with no server name specified")
+		return
+	end
+	if not server_version then
+		self:warn_incoming_("004 with no server version specified")
+		return
+	end
+	if not user_modes then
+		self:warn_incoming_("004 with no user modes specified")
+		return
+	end
+	if not channel_modes then
+		self:warn_incoming_("004 with no channel modes specified")
+		return
+	end
+	self.welcome_.server_name = server_name
+	self.welcome_.server_version = server_version
+	self.welcome_.user_modes = user_modes
+	self.welcome_.channel_modes = channel_modes
+	self.registered_ = true
+	self:call_hook_("register", self.welcome_)
+end
+
 function client_i:handle_372_(motd_line)
 	if not self.receiving_motd_ then
 		self:warn_incoming_("372 while not receiving motd")
 		return
 	end
 	if not motd_line then
-		self:warn_incoming_("372 with no motd line specified")
+		self:warn_incoming_("372 with no motd line")
 		return
 	end
 	table.insert(self.motd_, motd_line)
@@ -205,7 +274,11 @@ function client_i:dispatch_()
 					if handler then
 						handler(self, unpack(params))
 					else
-						self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(params, " ")))
+						local quoted_params = {}
+						for ix = 1, #params do
+							table.insert(quoted_params, ("%q"):format(params[ix]))
+						end
+						self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
 					end
 				end
 			else
@@ -215,13 +288,24 @@ function client_i:dispatch_()
 	end
 end
 
+function client_i:assert_chat_phase_()
+	if self.status_ ~= "running" then
+		error("not running", 3)
+	end
+	if not self.registered_ then
+		error("not yet registered", 3)
+	end
+end
+
 function client_i:privmsg(target_in, message_in)
+	self:assert_chat_phase_()
 	local target = assert_param(ok_nonempty_string, target_in, "target")
 	local message = assert_param(ok_string, message_in, "message")
 	self:send_("privmsg", { target }, message)
 end
 
 function client_i:notice(target_in, message_in)
+	self:assert_chat_phase_()
 	local target = assert_param(ok_nonempty_string, target_in, "target")
 	local message = assert_param(ok_string, message_in, "message")
 	self:send_("notice", { target }, message)
@@ -363,8 +447,10 @@ local function make_client(params_in)
 		receiving_motd_ = false,
 		death_reason_ = false,
 		connecting_ = false,
+		registered_ = false,
 		motd_ = {},
 		hooks_ = {},
+		welcome_ = {},
 		default_quit_message_ = "quit",
 	}, client_m)
 end
