@@ -74,6 +74,11 @@ end
 local client_i = {}
 local client_m = { __index = client_i }
 
+function client_i:get_channel(channel_in)
+	local channel = assert_param(ok_nonempty_string, channel_in, "channel")
+	return self.channels_[channel]
+end
+
 function client_i:get_lusers()
 	return self.lusers_
 end
@@ -244,8 +249,7 @@ function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
 		self:warn_incoming_("005 when ISUPPORT tokens already received")
 		return
 	end
-	if not client then
-		self:stop_("005 with no client specified")
+	if not self:check_client_("005", client) then
 		return
 	end
 	local tokens = { ... }
@@ -300,26 +304,41 @@ handle_by_hook("250") -- * RPL_STATSDLINE, RPL_STATSCONN
 handle_by_hook("301") -- * RPL_AWAY
 
 function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
+	if not self:check_client_("251", client) then
+		return
+	end
 	self.lusers_.client = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
 
 function client_i:handle_252_(client, ...) -- * RPL_LUSEROP
+	if not self:check_client_("252", client) then
+		return
+	end
 	self.lusers_.op = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
 
 function client_i:handle_253_(client, ...) -- * RPL_LUSERUNKNOWN
+	if not self:check_client_("253", client) then
+		return
+	end
 	self.lusers_.unknown = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
 
 function client_i:handle_254_(client, ...) -- * RPL_LUSERCHANNELS
+	if not self:check_client_("254", client) then
+		return
+	end
 	self.lusers_.channels = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
 
 function client_i:handle_255_(client, ...) -- * RPL_LUSERME
+	if not self:check_client_("255", client) then
+		return
+	end
 	self.lusers_.me = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
@@ -347,11 +366,17 @@ function client_i:handle_263_(command) -- * RPL_TRYAGAIN
 end
 
 function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
+	if not self:check_client_("265", client) then
+		return
+	end
 	self.lusers_.loc = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
 
 function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
+	if not self:check_client_("266", client) then
+		return
+	end
 	self.lusers_.glob = table.concat({ ... }, " ")
 	self.handled_lusers_ = true
 end
@@ -383,13 +408,138 @@ function client_i:handle_306_() -- * RPL_NOWAWAY
 	end
 end
 
+function client_i:handle_331_(client, channel, topic) -- * RPL_NOTOPIC
+	if not self:check_client_("331", client) then
+		return
+	end
+	if not channel then
+		self:stop_("331 with no channel specified")
+		return
+	end
+	if not self.channels_[channel] then
+		self:warn_incoming_("331 for channel " .. channel .. " while not joined")
+		return
+	end
+	self.channels_[channel].topic = nil
+	self:call_hook_("topic", channel)
+end
+
+function client_i:handle_332_(client, channel, topic) -- * RPL_TOPIC
+	if not self:check_client_("332", client) then
+		return
+	end
+	if not channel then
+		self:stop_("332 with no channel specified")
+		return
+	end
+	if not topic then
+		self:stop_("332 with no topic specified")
+		return
+	end
+	if not self.channels_[channel] then
+		self:warn_incoming_("332 for channel " .. channel .. " while not joined")
+		return
+	end
+	self.channels_[channel].topic = topic
+	self:call_hook_("topic", channel)
+end
+
+function client_i:handle_333_(client, channel, nick, setat) -- * RPL_TOPICWHOTIME
+	if not self:check_client_("333", client) then
+		return
+	end
+	if not channel then
+		self:stop_("333 with no channel specified")
+		return
+	end
+	if not nick then
+		self:stop_("333 with no nick specified")
+		return
+	end
+	if not setat then
+		self:stop_("333 with no setat specified")
+		return
+	end
+	if not self.channels_[channel] then
+		self:warn_incoming_("333 for channel " .. channel .. " while not joined")
+		return
+	end
+	self.channels_[channel].topic_by = nick
+	self.channels_[channel].topic_at = setat
+	self:call_hook_("topicwhotime", channel)
+end
+
+do
+	local symbol_lookup = {
+		["="] = "public",
+		["@"] = "secret",
+		["*"] = "private",
+	}
+
+	function client_i:handle_353_(client, symbol, channel, prefixes_and_nicks) -- * RPL_NAMREPLY
+		if not self:check_client_("353", client) then
+			return
+		end
+		if not symbol then
+			self:stop_("353 with no symbol specified")
+			return
+		end
+		if not channel then
+			self:stop_("353 with no channel specified")
+			return
+		end
+		if not prefixes_and_nicks then
+			self:stop_("353 with no nicks specified")
+			return
+		end
+		if not self.channels_[channel] then
+			self:warn_incoming_("353 for channel " .. channel .. " while not joined")
+			return
+		end
+		self.channels_[channel].status = symbol_lookup[symbol] or "unknown"
+		local highest_modes = {}
+		local nicks = {}
+		for prefix_and_nick in prefixes_and_nicks:gmatch("[^ ]+") do
+			local nick = prefix_and_nick
+			local prefix_letter = nick:sub(1, 1)
+			local prefix_mode = self.prefix_letter_to_mode_[prefix_letter]
+			if prefix_mode then
+				nick = nick:sub(2)
+			end
+			if ok_nick(nick) then
+				highest_modes[nick] = prefix_mode
+				table.insert(nicks, nick)
+			else
+				self:warn_incoming_("invalid nick-prefix pair in 353: " .. prefix_and_nick)
+			end
+		end
+		self.channels_[channel].highest_modes = highest_modes
+		self.channels_[channel].nicks = nicks
+	end
+end
+
+function client_i:handle_366_(client, channel) -- * RPL_ENDOFNAMES
+	if not self:check_client_("366", client) then
+		return
+	end
+	if not channel then
+		self:stop_("366 with no channel specified")
+		return
+	end
+	if not self.channels_[channel] then
+		self:warn_incoming_("366 for channel " .. channel .. " while not joined")
+		return
+	end
+	self:call_hook_("names", channel)
+end
+
 function client_i:handle_372_(motd_line) -- * RPL_MOTD
 	if not self.receiving_motd_ then
 		self:warn_incoming_("372 while not receiving motd")
 		return
 	end
 	if not motd_line then
-		self:warn_incoming_("372 with no motd line")
+		self:stop_("372 with no motd line")
 		return
 	end
 	table.insert(self.motd_, motd_line)
@@ -492,7 +642,7 @@ function client_i:handle_join_(channels)
 				self:warn_incoming_("channel " .. channel .. " in join list while already joined")
 			else
 				self.channels_[channel] = {}
-				self:call_hook_("self_join", channel, self.channels_[channel])
+				self:call_hook_("self_join", channel)
 			end
 		end
 	end
@@ -530,7 +680,7 @@ function client_i:handle_part_(channels)
 			if not self.channels_[channel] then
 				self:warn_incoming_("channel " .. channel .. " in part list while not joined")
 			else
-				self:call_hook_("self_part", channel, self.channels_[channel])
+				self:call_hook_("self_part", channel)
 				self.channels_[channel] = nil
 			end
 		end
@@ -672,19 +822,84 @@ function client_i:process_prefix_(prefix)
 	end
 end
 
-function client_i:process_isupport_()
-	if self.isupport_tokens_.CASEMAPPING then
-		if not casemappings[self.isupport_tokens_.CASEMAPPING] then
-			self:stop_("unknown casemapping " .. self.isupport_tokens_.CASEMAPPING)
-			return
-		end
-		local old_nick = self.nick_
-		self.casemapping_ = self.isupport_tokens_.CASEMAPPING
-		if self:lower(self.raw_nick_) ~= old_nick then
-			self:update_nick_(self.raw_nick_)
-		end
-	else
+function client_i:process_isupport_casemapping_(casemapping)
+	if not casemapping then
 		self:warn_incoming_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.casemapping_)
+		return true
+	end
+	if not casemappings[casemapping] then
+		self:stop_("unknown casemapping: " .. casemapping)
+		return
+	end
+	local old_nick = self.nick_
+	self.casemapping_ = casemapping
+	if self:lower(self.raw_nick_) ~= old_nick then
+		self:update_nick_(self.raw_nick_)
+	end
+	return true
+end
+
+function client_i:export_prefix_mapping_()
+	local modes = {}
+	local letters = {}
+	for mode, letter in pairs(self.prefix_mode_to_letter_) do
+		table.insert(modes, mode)
+		table.insert(letters, letter)
+	end
+	return "(" .. table.concat(modes) .. ")" .. table.concat(letters)
+end
+
+function client_i:process_isupport_prefix_(prefixes)
+	if not prefixes then
+		self:warn_incoming_("no PREFIX ISUPPORT token received, not changing currently effective prefix mapping " .. self:export_prefix_mapping_())
+		return true
+	end
+	if prefixes == "" then
+		prefixes = "()"
+	end
+	local modes, letters = prefixes:match("^%(([^%)]*)%)(.*)$")
+	if #modes ~= #letters then
+		self:stop_("invalid prefix mapping: " .. casemapping)
+		return false
+	end
+	local ambiguous = false
+	do
+		local used = {}
+		for mode in modes:gmatch(".") do
+			if used[mode] then
+				ambiguous = true
+			end
+			used[mode] = true
+		end
+	end
+	do
+		local used = {}
+		for letter in letters:gmatch(".") do
+			if used[letter] then
+				ambiguous = true
+			end
+			used[letter] = true
+		end
+	end
+	if ambiguous then
+		self:stop_("ambiguous prefix mapping: " .. casemapping)
+		return false
+	end
+	self.prefix_mode_to_letter_ = {}
+	self.prefix_letter_to_mode_ = {}
+	for ix = 1, #modes do
+		self.prefix_mode_to_letter_[modes:sub(ix, ix)] = letters:sub(ix, ix)
+		self.prefix_letter_to_mode_[letters:sub(ix, ix)] = modes:sub(ix, ix)
+	end
+	return true
+end
+
+function client_i:process_isupport_()
+	if not self:process_isupport_casemapping_(self.isupport_tokens_.CASEMAPPING) then
+		return
+	end
+	if not self:process_isupport_prefix_(self.isupport_tokens_.PREFIX) then
+		return
 	end
 	self:call_hook_("isupport", self.isupport_tokens_)
 end
@@ -836,9 +1051,21 @@ function client_i:call_hook_(name, ...)
 	local hooks = self.hooks_[name]
 	if hooks then
 		for hook in pairs(hooks) do
-			hook(self, ...)
+			self.queue_:wrap(hook, self, ...)
 		end
 	end
+end
+
+function client_i:check_client_(command, client)
+	if not client then
+		self:stop_(command .. " with no client specified")
+		return false
+	end
+	if self:lower(client) ~= self.nick_ then
+		self:stop_(command .. " addressed to the wrong client")
+		return false
+	end
+	return true
 end
 
 function client_i:disconnect_()
@@ -944,6 +1171,8 @@ local function make_client(params_in)
 		last_prefix_ = {},
 		channels_ = {},
 		casemapping_ = "rfc1459-strict",
+		prefix_mode_to_letter_ = { ["o"] = "@", ["v"] = "+" },
+		prefix_letter_to_mode_ = { ["@"] = "o", ["+"] = "v" },
 	}, client_m)
 	client.nick_ = client:lower(client.raw_nick_)
 	return client

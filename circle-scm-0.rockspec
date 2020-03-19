@@ -13,8 +13,8 @@ source = {
 
 dependencies = {
 	"lua >= 5.1",
-	"cqueues >= 20161214",
-	"luaossl >= 20161208",
+	"cqueues >= 20190731",
+	"luaossl >= 20190731",
 }
 
 build = {
