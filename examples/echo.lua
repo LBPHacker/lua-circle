@@ -20,9 +20,15 @@ local client = circle.client({
 })
 
 local shutdown_cond = condition.new()
-client:hook("stop", function(self, death_reason)
-	print(death_reason)
+client:hook("stop", function(self, stop_reason)
+	if stop_reason then
+		print("STOP: " .. stop_reason)
+	end
 	shutdown_cond:signal()
+end)
+
+client:hook("warn", function(self, warn_reason)
+	print("WARN: " .. warn_reason)
 end)
 
 queue:wrap(function()

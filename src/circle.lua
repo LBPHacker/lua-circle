@@ -71,16 +71,53 @@ local function assert_param_default(ok, thing, name)
 	return thing and (ok(thing) and thing or error("invalid " .. name, 3)) or nil
 end
 
+local user_i = {}
+local user_m = { __index = user_i }
+
+function user_i:get_name()
+	return self.name_
+end
+
+function user_i:get_raw_name()
+	return self.raw_name_
+end
+
+local channel_i = {}
+local channel_m = { __index = channel_i }
+
+function channel_i:get_name()
+	return self.name_
+end
+
+function channel_i:get_raw_name()
+	return self.raw_name_
+end
+
+function channel_i:get_status()
+	return self.status_
+end
+
+function channel_i:get_topic()
+	return self.topic_, self.topic_by_, self.topic_at_
+end
+
+function channel_i:get_highest_modes()
+	return self.highest_modes_
+end
+
+function channel_i:get_users()
+	return self.users_
+end
+
 local client_i = {}
 local client_m = { __index = client_i }
 
-function client_i:get_channel(channel_in)
-	local channel = assert_param(ok_nonempty_string, channel_in, "channel")
-	return self.channels_[channel]
-end
-
 function client_i:get_lusers()
 	return self.lusers_
+end
+
+function client_i:get_users_in_channels()
+	return self.users_in_channels_
 end
 
 function client_i:get_away()
@@ -91,20 +128,24 @@ function client_i:get_isupport_tokens()
 	return self.isupport_tokens_
 end
 
-function client_i:get_death_reason()
-	return self.death_reason_
+function client_i:get_stop_reason()
+	return self.stop_reason_
 end
 
-function client_i:get_all_death_reasons()
-	return self.all_death_reasons_
+function client_i:get_all_stop_reasons()
+	return self.all_stop_reasons_
 end
 
-function client_i:get_nick()
+function client_i:get_raw_nick()
 	return self.raw_nick_
 end
 
-function client_i:get_canonical_nick()
+function client_i:get_nick()
 	return self.nick_
+end
+
+function client_i:get_channels()
+	return self.channels_
 end
 
 function client_i:get_status()
@@ -163,14 +204,8 @@ function client_i:send_(command, middles, trailing, prefix)
 	end
 end
 
-function client_i:warn_incoming_(message)
-	print(message)
-end
-
-local function handle_by_hook(command)
-	client_i["handle_" .. command .. "_"] = function(self, ...)
-		self:call_hook_(command, ...)
-	end
+function client_i:warn_(message)
+	self:call_hook_("warn", message)
 end
 
 function client_i:handle_001_(welcome) -- * RPL_WELCOME
@@ -182,13 +217,15 @@ function client_i:handle_001_(welcome) -- * RPL_WELCOME
 		self:stop_("001 with no welcome line")
 		return
 	end
+	self.welcome_ = {}
 	self.welcome_.welcome = welcome
-	self.expecting_welcome_ = "002"
+	self.registered_ = true
+	self:call_hook_("register")
 end
 
 function client_i:handle_002_(yourhost) -- * RPL_YOURHOST
-	if self.registered_ then
-		self:stop_("002 when already registered")
+	if not self.welcome_ then
+		self:stop_("002 before 001")
 		return
 	end
 	if not yourhost then
@@ -196,12 +233,11 @@ function client_i:handle_002_(yourhost) -- * RPL_YOURHOST
 		return
 	end
 	self.welcome_.yourhost = yourhost
-	self.expecting_welcome_ = "003"
 end
 
 function client_i:handle_003_(created) -- * RPL_CREATED
-	if self.registered_ then
-		self:stop_("003 when already registered")
+	if not self.welcome_ then
+		self:stop_("003 before 001")
 		return
 	end
 	if not created then
@@ -209,12 +245,11 @@ function client_i:handle_003_(created) -- * RPL_CREATED
 		return
 	end
 	self.welcome_.created = created
-	self.expecting_welcome_ = "004"
 end
 
 function client_i:handle_004_(server_name, server_version, user_modes, channel_modes) -- * RPL_MYINFO
-	if self.registered_ then
-		self:stop_("004 when already registered")
+	if not self.welcome_ then
+		self:stop_("004 before 001")
 		return
 	end
 	if not server_name then
@@ -237,31 +272,31 @@ function client_i:handle_004_(server_name, server_version, user_modes, channel_m
 	self.welcome_.server_version = server_version
 	self.welcome_.user_modes = user_modes
 	self.welcome_.channel_modes = channel_modes
-	self.registered_ = true
-	self.expecting_welcome_ = nil
-	self.expecting_isupport_ = "005"
-	self:call_hook_("welcome", self.welcome_)
 end
 
 function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
-	if not self.expecting_isupport_ then
+	if not self.receiving_isupport_ and self.isupport_tokens_ then
 		-- * TODO: handle these, stop when casemapping randomly changes, etc.
-		self:warn_incoming_("005 when ISUPPORT tokens already received")
+		self:warn_("005 when ISUPPORT tokens already received")
 		return
 	end
-	if not self:check_client_("005", client) then
+	if not self:check_client_self_("005", client) then
 		return
 	end
+	self.receiving_isupport_ = true
 	local tokens = { ... }
 	if #tokens == 0 then
 		self:stop_("005 with no tokens specified")
 		return
 	end
 	if #tokens == 1 then
-		self:warn_incoming_("005 matching format of legacy RPL_BOUNCE")
+		self:warn_("005 matching format of legacy RPL_BOUNCE")
 		self.compat_flags_.no_isupport = true
-		self:stop_("bounced: " .. tokens[1])
+		self:stop_("bounced (005): " .. tokens[1])
 		return
+	end
+	if not self.isupport_tokens_ then
+		self.isupport_tokens_ = {}
 	end
 	for ix = 1, #tokens - 1 do -- * Last parameter is just a dummy.
 		local parameter = tokens[ix]
@@ -297,50 +332,65 @@ function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
 end
 
 function client_i:handle_010_(...) -- * RPL_BOUNCE
-	self:stop_("bounced: " .. table.concat({ ... }, " "))
+	self:stop_("bounced (010): " .. table.concat({ ... }, " "))
 end
 
-handle_by_hook("250") -- * RPL_STATSDLINE, RPL_STATSCONN
-handle_by_hook("301") -- * RPL_AWAY
-
-function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
-	if not self:check_client_("251", client) then
+function client_i:handle_250_(client, ...) -- * RPL_STATSDLINE, RPL_STATSCONN
+	if not self:check_client_self_("250", client) then
 		return
 	end
-	self.lusers_.client = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	self:call_hook_("250", ...)
+end
+
+function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
+	if not self:check_client_self_("251", client) then
+		return
+	end
+	self.receiving_lusers_ = {}
+	self.receiving_lusers_.client = table.concat({ ... }, " ")
 end
 
 function client_i:handle_252_(client, ...) -- * RPL_LUSEROP
-	if not self:check_client_("252", client) then
+	if not self.receiving_lusers_ then
+		self:stop_("252 while not receiving lusers")
 		return
 	end
-	self.lusers_.op = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	if not self:check_client_self_("252", client) then
+		return
+	end
+	self.receiving_lusers_.op = table.concat({ ... }, " ")
 end
 
 function client_i:handle_253_(client, ...) -- * RPL_LUSERUNKNOWN
-	if not self:check_client_("253", client) then
+	if not self.receiving_lusers_ then
+		self:stop_("253 while not receiving lusers")
 		return
 	end
-	self.lusers_.unknown = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	if not self:check_client_self_("253", client) then
+		return
+	end
+	self.receiving_lusers_.unknown = table.concat({ ... }, " ")
 end
 
 function client_i:handle_254_(client, ...) -- * RPL_LUSERCHANNELS
-	if not self:check_client_("254", client) then
+	if not self.receiving_lusers_ then
+		self:stop_("254 while not receiving lusers")
 		return
 	end
-	self.lusers_.channels = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	if not self:check_client_self_("254", client) then
+		return
+	end
+	self.receiving_lusers_.channels = table.concat({ ... }, " ")
 end
 
 function client_i:handle_255_(client, ...) -- * RPL_LUSERME
-	if not self:check_client_("255", client) then
+	if not self:check_client_self_("255", client) then
 		return
 	end
-	self.lusers_.me = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	self.receiving_lusers_.me = table.concat({ ... }, " ")
+	self.lusers_ = self.receiving_lusers_
+	self.receiving_lusers_ = nil
+	self:call_hook_("lusers", self.lusers_)
 end
 
 function client_i:handle_263_(command) -- * RPL_TRYAGAIN
@@ -350,7 +400,7 @@ function client_i:handle_263_(command) -- * RPL_TRYAGAIN
 			self.setting_nick_:signal()
 			self.setting_nick_ = nil
 		else
-			self:warn_incoming_("263 to nick while not setting nick")
+			self:warn_("263 to nick while not setting nick")
 		end
 	elseif command == "away" then
 		if self.setting_away_ then
@@ -358,27 +408,37 @@ function client_i:handle_263_(command) -- * RPL_TRYAGAIN
 			self.setting_away_:signal()
 			self.setting_away_ = nil
 		else
-			self:warn_incoming_("263 to away while not setting away")
+			self:warn_("263 to away while not setting away")
 		end
 	else
-		self:warn_incoming_("263 to " .. command)
+		self:warn_("263 to " .. command)
 	end
 end
 
 function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
-	if not self:check_client_("265", client) then
+	if not self:check_client_self_("265", client) then
 		return
 	end
 	self.lusers_.loc = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
 end
 
 function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
-	if not self:check_client_("266", client) then
+	if not self:check_client_self_("266", client) then
 		return
 	end
 	self.lusers_.glob = table.concat({ ... }, " ")
-	self.handled_lusers_ = true
+	self:call_hook_("luserslocglob", self.lusers_)
+end
+
+function client_i:handle_301_(nick) -- * RPL_AWAY
+	if not nick then
+		self:stop_("301 with no nick specified")
+		return
+	end
+	nick = self:lower(nick)
+	if self.users_in_channels_[nick] then
+		-- * TODO: update away status
+	end
 end
 
 function client_i:handle_305_() -- * RPL_UNAWAY
@@ -386,7 +446,7 @@ function client_i:handle_305_() -- * RPL_UNAWAY
 		self.away_ = nil
 		self:call_hook_("unaway")
 	else
-		self:warn_incoming_("305 while not away")
+		self:warn_("305 while not away")
 	end
 	if self.setting_away_ then
 		self.setting_away_:signal()
@@ -396,11 +456,11 @@ end
 
 function client_i:handle_306_() -- * RPL_NOWAWAY
 	if self.away_ then
-		self:warn_incoming_("306 while away")
+		self:warn_("306 while away")
 	else
 		self.away_ = self.away_message_sent_
 		self.away_message_sent_ = nil
-		self:call_hook_("away")
+		self:call_hook_("away", self.away_)
 	end
 	if self.setting_away_ then
 		self.setting_away_:signal()
@@ -409,49 +469,52 @@ function client_i:handle_306_() -- * RPL_NOWAWAY
 end
 
 function client_i:handle_331_(client, channel, topic) -- * RPL_NOTOPIC
-	if not self:check_client_("331", client) then
+	if not self:check_client_self_("331", client) then
 		return
 	end
 	if not channel then
 		self:stop_("331 with no channel specified")
 		return
 	end
+	channel = self:lower(channel)
 	if not self.channels_[channel] then
-		self:warn_incoming_("331 for channel " .. channel .. " while not joined")
+		self:warn_("331 for channel " .. channel .. " while not joined")
 		return
 	end
-	self.channels_[channel].topic = nil
-	self:call_hook_("topic", channel)
+	self.channels_[channel].topic_ = nil
+	self:call_hook_("topic", self.channels_[channel])
 end
 
 function client_i:handle_332_(client, channel, topic) -- * RPL_TOPIC
-	if not self:check_client_("332", client) then
+	if not self:check_client_self_("332", client) then
 		return
 	end
 	if not channel then
 		self:stop_("332 with no channel specified")
 		return
 	end
+	channel = self:lower(channel)
 	if not topic then
 		self:stop_("332 with no topic specified")
 		return
 	end
 	if not self.channels_[channel] then
-		self:warn_incoming_("332 for channel " .. channel .. " while not joined")
+		self:warn_("332 for channel " .. channel .. " while not joined")
 		return
 	end
-	self.channels_[channel].topic = topic
-	self:call_hook_("topic", channel)
+	self.channels_[channel].topic_ = topic
+	self:call_hook_("topic", self.channels_[channel])
 end
 
 function client_i:handle_333_(client, channel, nick, setat) -- * RPL_TOPICWHOTIME
-	if not self:check_client_("333", client) then
+	if not self:check_client_self_("333", client) then
 		return
 	end
 	if not channel then
 		self:stop_("333 with no channel specified")
 		return
 	end
+	channel = self:lower(channel)
 	if not nick then
 		self:stop_("333 with no nick specified")
 		return
@@ -461,12 +524,12 @@ function client_i:handle_333_(client, channel, nick, setat) -- * RPL_TOPICWHOTIM
 		return
 	end
 	if not self.channels_[channel] then
-		self:warn_incoming_("333 for channel " .. channel .. " while not joined")
+		self:warn_("333 for channel " .. channel .. " while not joined")
 		return
 	end
-	self.channels_[channel].topic_by = nick
-	self.channels_[channel].topic_at = setat
-	self:call_hook_("topicwhotime", channel)
+	self.channels_[channel].topic_by_ = nick
+	self.channels_[channel].topic_at_ = setat
+	self:call_hook_("topicwhotime", self.channels_[channel])
 end
 
 do
@@ -477,7 +540,7 @@ do
 	}
 
 	function client_i:handle_353_(client, symbol, channel, prefixes_and_nicks) -- * RPL_NAMREPLY
-		if not self:check_client_("353", client) then
+		if not self:check_client_self_("353", client) then
 			return
 		end
 		if not symbol then
@@ -488,54 +551,53 @@ do
 			self:stop_("353 with no channel specified")
 			return
 		end
+		channel = self:lower(channel)
 		if not prefixes_and_nicks then
 			self:stop_("353 with no nicks specified")
 			return
 		end
 		if not self.channels_[channel] then
-			self:warn_incoming_("353 for channel " .. channel .. " while not joined")
+			self:warn_("353 for channel " .. channel .. " while not joined")
 			return
 		end
-		self.channels_[channel].status = symbol_lookup[symbol] or "unknown"
-		local highest_modes = {}
-		local nicks = {}
+		self.channels_[channel].status_ = symbol_lookup[symbol] or "unknown"
 		for prefix_and_nick in prefixes_and_nicks:gmatch("[^ ]+") do
-			local nick = prefix_and_nick
-			local prefix_letter = nick:sub(1, 1)
+			local raw_nick = prefix_and_nick
+			local prefix_letter = raw_nick:sub(1, 1)
 			local prefix_mode = self.prefix_letter_to_mode_[prefix_letter]
 			if prefix_mode then
-				nick = nick:sub(2)
+				raw_nick = raw_nick:sub(2)
 			end
-			if ok_nick(nick) then
-				highest_modes[nick] = prefix_mode
-				table.insert(nicks, nick)
+			if ok_nick(raw_nick) then
+				local nick = self:lower(raw_nick)
+				self:add_user_to_channel_(channel, nick, raw_nick)
+				self.channels_[channel].highest_modes_[nick] = prefix_mode
 			else
-				self:warn_incoming_("invalid nick-prefix pair in 353: " .. prefix_and_nick)
+				self:warn_("invalid nick-prefix pair in 353: " .. prefix_and_nick)
 			end
 		end
-		self.channels_[channel].highest_modes = highest_modes
-		self.channels_[channel].nicks = nicks
 	end
 end
 
 function client_i:handle_366_(client, channel) -- * RPL_ENDOFNAMES
-	if not self:check_client_("366", client) then
+	if not self:check_client_self_("366", client) then
 		return
 	end
 	if not channel then
 		self:stop_("366 with no channel specified")
 		return
 	end
+	channel = self:lower(channel)
 	if not self.channels_[channel] then
-		self:warn_incoming_("366 for channel " .. channel .. " while not joined")
+		self:warn_("366 for channel " .. channel .. " while not joined")
 		return
 	end
-	self:call_hook_("names", channel)
+	self:call_hook_("names", self.channels_[channel])
 end
 
 function client_i:handle_372_(motd_line) -- * RPL_MOTD
 	if not self.receiving_motd_ then
-		self:warn_incoming_("372 while not receiving motd")
+		self:stop_("372 while not receiving motd")
 		return
 	end
 	if not motd_line then
@@ -546,34 +608,26 @@ function client_i:handle_372_(motd_line) -- * RPL_MOTD
 end
 
 function client_i:handle_375_() -- * RPL_MOTDSTART
-	if not self.expecting_motd_ then
-		self:warn_incoming_("375 while not expecting motd")
-		return
-	end
 	if self.receiving_motd_ then
-		self:warn_incoming_("375 while already receiving motd")
+		self:stop_("375 while already receiving motd")
 		return
 	end
 	self.receiving_motd_ = true
-	self.expecting_motd_ = nil
 	self.motd_ = {}
 end
 
 function client_i:handle_376_() -- * RPL_ENDOFMOTD
 	if not self.receiving_motd_ then
-		self:warn_incoming_("376 while not receiving motd")
+		self:stop_("376 while not receiving motd")
 		return
 	end
 	self.receiving_motd_ = nil
+	self:call_hook_("motd", self.motd_)
 end
 
 function client_i:handle_422_() -- * ERR_NOMOTD
-	if not self.expecting_motd_ then
-		self:warn_incoming_("422 while not expecting motd")
-		return
-	end
-	self.expecting_motd_ = nil
 	self.motd_ = false
+	self:call_hook_("motd", self.motd_)
 end
 
 function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
@@ -582,7 +636,7 @@ function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
 		self.setting_nick_:signal()
 		self.setting_nick_ = nil
 	else
-		self:warn_incoming_("432 while not setting nick")
+		self:warn_("432 while not setting nick")
 	end
 end
 
@@ -592,7 +646,7 @@ function client_i:handle_433_(command) -- * ERR_NICKNAMEINUSE
 		self.setting_nick_:signal()
 		self.setting_nick_ = nil
 	else
-		self:warn_incoming_("433 while not setting nick")
+		self:warn_("433 while not setting nick")
 	end
 end
 
@@ -602,15 +656,17 @@ end
 
 function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
 	if ok_nick(nick_or_channel) then
+		local nick = self:lower(nick_or_channel)
 		-- * Assume it's a nick.
 		if self.setting_nick_ then
 			self.set_nick_error_ = 437
 			self.setting_nick_:signal()
 			self.setting_nick_ = nil
 		else
-			self:warn_incoming_("437 while not setting nick")
+			self:warn_("437 while not setting nick")
 		end
 	else
+		local channel = self:lower(nick_or_channel)
 		-- * Assume it's a channel.
 		-- * TODO: handle the channel case
 	end
@@ -623,7 +679,7 @@ function client_i:handle_484_() -- * ERR_RESTRICTED
 		self.setting_nick_:signal()
 		self.setting_nick_ = nil
 	else
-		self:warn_incoming_("484 while not setting nick")
+		self:warn_("484 while not setting nick")
 	end
 end
 
@@ -636,13 +692,22 @@ function client_i:handle_join_(channels)
 		self:stop_("join with no channels specified")
 		return
 	end
-	if self:prefix_is_self_() then
-		for channel in channels:gmatch("[^,]+") do
-			if self.channels_[channel] then
-				self:warn_incoming_("channel " .. channel .. " in join list while already joined")
+	for raw_name in channels:gmatch("[^,]+") do
+		local name = self:lower(raw_name)
+		if self.channels_[name] then
+			self:warn_("channel " .. name .. " in join list while already joined")
+		else
+			if self:prefix_is_self_() then
+				self.channels_[name] = setmetatable({
+					client_ = self,
+					name_ = name,
+					raw_name_ = raw_name,
+					highest_modes_ = {},
+					users_ = {},
+				}, channel_m)
+				self:call_hook_("self_join", self.channels_[name])
 			else
-				self.channels_[channel] = {}
-				self:call_hook_("self_join", channel)
+				self:add_user_to_channel_(name, self.last_prefix_.nick, self.last_prefix_.raw_nick)
 			end
 		end
 	end
@@ -666,6 +731,22 @@ function client_i:handle_nick_(new)
 	end
 end
 
+function client_i:handle_notice_(target, message)
+	if not self.last_prefix_.nick then
+		self:stop_("notice with no nickname specified in prefix")
+		return
+	end
+	if not target then
+		self:stop_("notice with no target specified")
+		return
+	end
+	if not message then
+		self:stop_("notice with no message specified")
+		return
+	end
+	self:call_hook_("notice", self.last_prefix_.nick, target, message)
+end
+
 function client_i:handle_part_(channels)
 	if not self.last_prefix_.nick then
 		self:stop_("part with no nickname specified in prefix")
@@ -675,16 +756,38 @@ function client_i:handle_part_(channels)
 		self:stop_("part with no channels specified")
 		return
 	end
-	if self:prefix_is_self_() then
-		for channel in channels:gmatch("[^,]+") do
-			if not self.channels_[channel] then
-				self:warn_incoming_("channel " .. channel .. " in part list while not joined")
+	for raw_name in channels:gmatch("[^,]+") do
+		local name = self:lower(raw_name)
+		if not self.channels_[name] then
+			self:warn_("channel " .. name .. " in part list while not joined")
+		else
+			if self:prefix_is_self_() then
+				for nick in pairs(self.channels_[name].users_) do
+					self:remove_user_from_channel_(name, nick)
+				end
+				self.channels_[name] = nil
+				self:call_hook_("self_part", self.channels_[name])
 			else
-				self:call_hook_("self_part", channel)
-				self.channels_[channel] = nil
+				self:remove_user_from_channel_(name, self.last_prefix_.nick)
 			end
 		end
 	end
+end
+
+function client_i:handle_privmsg_(target, message)
+	if not self.last_prefix_.nick then
+		self:stop_("privmsg with no nickname specified in prefix")
+		return
+	end
+	if not target then
+		self:stop_("privmsg with no target specified")
+		return
+	end
+	if not message then
+		self:stop_("privmsg with no message specified")
+		return
+	end
+	self:call_hook_("privmsg", self.last_prefix_.nick, target, message)
 end
 
 function client_i:handle_ping_(server, server2)
@@ -696,27 +799,15 @@ function client_i:handle_ping_(server, server2)
 end
 
 function client_i:pre_handler_(command) -- * Used for edge-triggering.
-	if self.expecting_welcome_ and command ~= self.expecting_welcome_ then
-		self:stop_("bad welcome sequence: expected " .. self.expecting_welcome_ .. ", got " .. command)
-		self.expecting_welcome_ = nil
-	end
-	if self.expecting_isupport_ and command ~= self.expecting_isupport_ then
-		self.expecting_isupport_ = nil
+	if self.isupport_tokens_ and command ~= "005" then
+		self.receiving_isupport_ = nil
 		if not next(self.isupport_tokens_) then
 			-- * TODO: handle this somehow
-			self:warn_incoming_("server sent no ISUPPORT tokens")
+			self:warn_("server sent no ISUPPORT tokens")
 			self.compat_flags_.no_isupport = true
 		end
 		self:process_isupport_()
 	end
-end
-
-function client_i:post_handler_(command) -- * Used for edge-triggering.
-	if self.receiving_lusers_ and not self.handled_lusers_ then
-		self:call_hook_("lusers", self.lusers_)
-	end
-	self.receiving_lusers_ = self.handled_lusers_
-	self.handled_lusers_ = nil
 end
 
 function client_i:dispatch_()
@@ -730,11 +821,35 @@ function client_i:dispatch_()
 			local line_without_crlf, err = self.client_socket_:read()
 			if line_without_crlf then
 				self:process_line_(line_without_crlf)
+			elseif self.quitting_ then
+				self:stop_()
 			else
-				self:stop_("read failed: " .. tostring(err))
+				self:stop_("read failed: " .. tostring(err or "eof"))
 			end
 		end
 	end
+end
+
+function client_i:remove_user_from_channel_(channel, nick)
+	self.channels_[channel].users_[nick] = nil
+	self.users_in_channels_[nick].channels_[channel] = nil
+	if not next(self.users_in_channels_[nick].channels_) then
+		self:call_hook_("user_disappear", self.users_in_channels_[nick])
+		self.users_in_channels_[nick] = nil
+	end
+end
+
+function client_i:add_user_to_channel_(channel, nick, raw_nick)
+	if not self.users_in_channels_[nick] then
+		self.users_in_channels_[nick] = setmetatable({
+			name_ = nick,
+			raw_name_ = raw_nick,
+			channels_ = {},
+		}, user_m)
+		self:call_hook_("user_appear", self.users_in_channels_[nick])
+	end
+	self.channels_[channel].users_[nick] = self.users_in_channels_[nick]
+	self.users_in_channels_[nick].channels_[channel] = true
 end
 
 function client_i:prefix_is_self_()
@@ -799,9 +914,8 @@ function client_i:process_line_(line_without_crlf)
 			for ix = 1, #params do
 				table.insert(quoted_params, ("%q"):format(params[ix]))
 			end
-			self:warn_incoming_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
+			self:warn_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
 		end
-		self:post_handler_(command)
 	end
 end
 
@@ -813,10 +927,12 @@ function client_i:process_prefix_(prefix)
 		local nick, user = nick_and_user:match("^(.*)!([^!]+)$")
 		nick = nick or nick_and_user
 		self.last_prefix_.nick = nick and self:lower(nick) or false
+		self.last_prefix_.raw_nick = nick or false
 		self.last_prefix_.user = user or false
 		self.last_prefix_.host = host or false
 	else
 		self.last_prefix_.nick = false
+		self.last_prefix_.raw_nick = false
 		self.last_prefix_.user = false
 		self.last_prefix_.host = false
 	end
@@ -824,7 +940,7 @@ end
 
 function client_i:process_isupport_casemapping_(casemapping)
 	if not casemapping then
-		self:warn_incoming_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.casemapping_)
+		self:warn_("no CASEMAPPING ISUPPORT token received, not changing currently effective casemapping " .. self.casemapping_)
 		return true
 	end
 	if not casemappings[casemapping] then
@@ -851,7 +967,7 @@ end
 
 function client_i:process_isupport_prefix_(prefixes)
 	if not prefixes then
-		self:warn_incoming_("no PREFIX ISUPPORT token received, not changing currently effective prefix mapping " .. self:export_prefix_mapping_())
+		self:warn_("no PREFIX ISUPPORT token received, not changing currently effective prefix mapping " .. self:export_prefix_mapping_())
 		return true
 	end
 	if prefixes == "" then
@@ -1011,20 +1127,21 @@ end
 
 function client_i:quit(message_in)
 	local message = assert_param_default(ok_string, message_in, "message") or self.default_quit_message_
+	self.quitting_ = true
 	self:send_("quit", {}, message)
 end
 
-function client_i:stop_(death_reason)
-	if death_reason then
-		if not self.all_death_reasons_ then
-			self.all_death_reasons_ = {}
+function client_i:stop_(stop_reason)
+	if stop_reason then
+		if not self.all_stop_reasons_ then
+			self.all_stop_reasons_ = {}
 		end
-		table.insert(self.all_death_reasons_, death_reason)
+		table.insert(self.all_stop_reasons_, stop_reason)
 	end
 	if self.status_ ~= "dead" then
-		self:call_hook_("stop", death_reason)
+		self:call_hook_("stop", stop_reason)
 		self.status_ = "dead"
-		self.death_reason_ = death_reason
+		self.stop_reason_ = stop_reason
 		self.stopping_cond_:signal()
 	end
 end
@@ -1059,6 +1176,14 @@ end
 function client_i:check_client_(command, client)
 	if not client then
 		self:stop_(command .. " with no client specified")
+		return false
+	end
+	self.last_client_ = client
+	return true
+end
+
+function client_i:check_client_self_(command, client)
+	if not self:check_client_(command, client) then
 		return false
 	end
 	if self:lower(client) ~= self.nick_ then
@@ -1161,14 +1286,11 @@ local function make_client(params_in)
 		message_size_limit_ = assert_param_default(ok_integer, params.message_size_limit, "message_size_limit") or 512,
 		default_quit_message_ = "quit",
 		default_away_message_ = "away",
-		expecting_motd_ = true,
 		hooks_ = {},
 		compat_flags_ = {},
-		isupport_tokens_ = {},
-		lusers_ = {},
-		welcome_ = {},
 		last_prefix_ = {},
 		channels_ = {},
+		users_in_channels_ = {},
 		casemapping_ = "rfc1459-strict",
 		prefix_mode_to_letter_ = { ["o"] = "@", ["v"] = "+" },
 		prefix_letter_to_mode_ = { ["@"] = "o", ["+"] = "v" },
