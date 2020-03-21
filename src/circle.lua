@@ -42,9 +42,6 @@ end
 local function ok_nonempty_string(str)
 	return type(str) == "string" and #str > 0
 end
-local function ok_nick(str)
-	return type(str) == "string" and str:find("^[A-Za-z%[%]\\`_^{|}][A-Za-z0-9%[%]\\`_^{|}-]*$")
-end
 local function ok_cqueues_controller(cq)
 	return cqueues.type(cq) == "controller"
 end
@@ -69,6 +66,23 @@ local function assert_param(ok, thing, name)
 end
 local function assert_param_default(ok, thing, name)
 	return thing and (ok(thing) and thing or error("invalid " .. name, 3)) or nil
+end
+-- * The folowing ok_* functions aren't actually enough to validate strings
+--   on the semantics level, but they're enough to validate them on the protocol
+--   level. If we send strings as parameters deemed valid by these, we'll at
+--   least get real errors back instead of the server cutting us off due to
+--   'not being able to speak IRC'.
+local function ok_nick(str)
+	return type(str) == "string" and str:find("^[A-Za-z%[%]\\`_^{|}][A-Za-z0-9%[%]\\`_^{|}-]*$")
+end
+local function ok_user(str)
+	return type(str) == "string" and str:find("^[\1-\9\11-\12\14-\31\33-\63\65-\255]+$")
+end
+local function ok_channel(str)
+	return type(str) == "string" and str:find("^[#+!&][\1-\7\8-\9\11-\12\14-\31\33-\43\45-\57\59-\255]+$")
+end
+local function ok_nick_or_channel(str)
+	return ok_nick(str) or ok_channel(str)
 end
 
 local user_i = {}
@@ -175,6 +189,7 @@ function client_i:upper(str)
 end
 
 function client_i:send_(command, middles, trailing, prefix)
+	-- * TODO: parameter checking
 	if self.status_ ~= "running" then
 		return
 	end
@@ -795,7 +810,11 @@ function client_i:handle_ping_(server, server2)
 		self:stop_("ping with no server specified")
 		return
 	end
-	self:send_("pong", { server, server2 })
+	if server2 then
+		self:send_("pong", { server }, server2)
+	else
+		self:send_("pong", {}, server)
+	end
 end
 
 function client_i:pre_handler_(command) -- * Used for edge-triggering.
@@ -1113,14 +1132,14 @@ end
 
 function client_i:privmsg(target_in, message_in)
 	self:assert_chat_phase_()
-	local target = assert_param(ok_nonempty_string, target_in, "target")
+	local target = assert_param(ok_nick_or_channel, target_in, "target")
 	local message = assert_param(ok_string, message_in, "message")
 	self:send_("privmsg", { target }, message)
 end
 
 function client_i:notice(target_in, message_in)
 	self:assert_chat_phase_()
-	local target = assert_param(ok_nonempty_string, target_in, "target")
+	local target = assert_param(ok_nick_or_channel, target_in, "target")
 	local message = assert_param(ok_string, message_in, "message")
 	self:send_("notice", { target }, message)
 end
@@ -1275,8 +1294,8 @@ local function make_client(params_in)
 	local client = setmetatable({
 		host_ = assert_param(ok_nonempty_string, params.host, "host"),
 		port_ = assert_param(ok_integer, params.port, "port"),
-		user_ = assert_param(ok_nonempty_string, params.user, "user"),
-		raw_nick_ = assert_param(ok_nonempty_string, params.nick, "nick"),
+		user_ = assert_param(ok_user, params.user, "user"),
+		raw_nick_ = assert_param(ok_nick, params.nick, "nick"),
 		pass_ = assert_param(ok_nonempty_string, params.pass, "pass"),
 		real_ = assert_param(ok_nonempty_string, params.real, "real"),
 		status_ = "ready",
