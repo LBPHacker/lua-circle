@@ -26,16 +26,11 @@ do
 	}
 	for name, mapping_init in pairs(casemappings_init) do
 		assert(#mapping_init.lower == #mapping_init.upper)
-		local lower = {}
-		local upper = {}
+		local mapping = {}
 		for ix = 1, #mapping_init.lower do
-			lower[mapping_init.upper:sub(ix, ix)] = mapping_init.lower:sub(ix, ix)
-			upper[mapping_init.lower:sub(ix, ix)] = mapping_init.upper:sub(ix, ix)
+			mapping[mapping_init.upper:sub(ix, ix)] = mapping_init.lower:sub(ix, ix)
 		end
-		casemappings[name] = {
-			lower = lower,
-			upper = upper,
-		}
+		casemappings[name] = mapping
 	end
 end
 
@@ -72,6 +67,9 @@ end
 --   level. If we send strings as parameters deemed valid by these, we'll at
 --   least get real errors back instead of the server cutting us off due to
 --   'not being able to speak IRC'.
+local function ok_key(str)
+	return type(str) == "string" and str:find("^[\1-\5\7-\8\12\14-\31\33-\127]+$")
+end
 local function ok_nick(str)
 	return type(str) == "string" and str:find("^[A-Za-z%[%]\\`_^{|}][A-Za-z0-9%[%]\\`_^{|}-]*$")
 end
@@ -171,19 +169,10 @@ function client_i:get_welcome()
 end
 
 function client_i:lower(str)
-	local lower = casemappings[self.casemapping_].lower
+	local lower = casemappings[self.casemapping_]
 	local out = {}
 	for letter in str:gmatch(".") do
 		table.insert(out, lower[letter] or letter)
-	end
-	return table.concat(out)
-end
-
-function client_i:upper(str)
-	local upper = casemappings[self.casemapping_].upper
-	local out = {}
-	for letter in str:gmatch(".") do
-		table.insert(out, upper[letter] or letter)
 	end
 	return table.concat(out)
 end
@@ -289,13 +278,10 @@ function client_i:handle_004_(server_name, server_version, user_modes, channel_m
 	self.welcome_.channel_modes = channel_modes
 end
 
-function client_i:handle_005_(client, ...) -- * RPL_ISUPPORT, hopefully
+function client_i:handle_005_(...) -- * RPL_ISUPPORT, hopefully
 	if not self.receiving_isupport_ and self.isupport_tokens_ then
 		-- * TODO: handle these, stop when casemapping randomly changes, etc.
 		self:warn_("005 when ISUPPORT tokens already received")
-		return
-	end
-	if not self:check_client_self_("005", client) then
 		return
 	end
 	self.receiving_isupport_ = true
@@ -350,58 +336,40 @@ function client_i:handle_010_(...) -- * RPL_BOUNCE
 	self:stop_("bounced (010): " .. table.concat({ ... }, " "))
 end
 
-function client_i:handle_250_(client, ...) -- * RPL_STATSDLINE, RPL_STATSCONN
-	if not self:check_client_self_("250", client) then
-		return
-	end
+function client_i:handle_250_(...) -- * RPL_STATSDLINE, RPL_STATSCONN
 	self:call_hook_("250", ...)
 end
 
-function client_i:handle_251_(client, ...) -- * RPL_LUSERCLIENT
-	if not self:check_client_self_("251", client) then
-		return
-	end
+function client_i:handle_251_(...) -- * RPL_LUSERCLIENT
 	self.receiving_lusers_ = {}
 	self.receiving_lusers_.client = table.concat({ ... }, " ")
 end
 
-function client_i:handle_252_(client, ...) -- * RPL_LUSEROP
+function client_i:handle_252_(...) -- * RPL_LUSEROP
 	if not self.receiving_lusers_ then
 		self:stop_("252 while not receiving lusers")
-		return
-	end
-	if not self:check_client_self_("252", client) then
 		return
 	end
 	self.receiving_lusers_.op = table.concat({ ... }, " ")
 end
 
-function client_i:handle_253_(client, ...) -- * RPL_LUSERUNKNOWN
+function client_i:handle_253_(...) -- * RPL_LUSERUNKNOWN
 	if not self.receiving_lusers_ then
 		self:stop_("253 while not receiving lusers")
-		return
-	end
-	if not self:check_client_self_("253", client) then
 		return
 	end
 	self.receiving_lusers_.unknown = table.concat({ ... }, " ")
 end
 
-function client_i:handle_254_(client, ...) -- * RPL_LUSERCHANNELS
+function client_i:handle_254_(...) -- * RPL_LUSERCHANNELS
 	if not self.receiving_lusers_ then
 		self:stop_("254 while not receiving lusers")
-		return
-	end
-	if not self:check_client_self_("254", client) then
 		return
 	end
 	self.receiving_lusers_.channels = table.concat({ ... }, " ")
 end
 
-function client_i:handle_255_(client, ...) -- * RPL_LUSERME
-	if not self:check_client_self_("255", client) then
-		return
-	end
+function client_i:handle_255_(...) -- * RPL_LUSERME
 	self.receiving_lusers_.me = table.concat({ ... }, " ")
 	self.lusers_ = self.receiving_lusers_
 	self.receiving_lusers_ = nil
@@ -425,22 +393,35 @@ function client_i:handle_263_(command) -- * RPL_TRYAGAIN
 		else
 			self:warn_("263 to away while not setting away")
 		end
+	elseif command == "join" then
+		if self.joining_ then
+			self.join_error_ = 263
+			self.joining_:signal()
+			self.joining_ = nil
+			self.joining_channel_ = nil
+		else
+			self:warn_("263 to join while not joining")
+		end
+	elseif command == "part" then
+		if self.parting_ then
+			self.part_error_ = 263
+			self.parting_:signal()
+			self.parting_ = nil
+			self.parting_channel_ = nil
+		else
+			self:warn_("263 to part while not parting")
+		end
 	else
 		self:warn_("263 to " .. command)
 	end
+	self:call_hook_("263", command)
 end
 
-function client_i:handle_265_(client, ...) -- * RPL_LOCALUSERS
-	if not self:check_client_self_("265", client) then
-		return
-	end
+function client_i:handle_265_(...) -- * RPL_LOCALUSERS
 	self.lusers_.loc = table.concat({ ... }, " ")
 end
 
-function client_i:handle_266_(client, ...) -- * RPL_GLOBALUSERS
-	if not self:check_client_self_("266", client) then
-		return
-	end
+function client_i:handle_266_(...) -- * RPL_GLOBALUSERS
 	self.lusers_.glob = table.concat({ ... }, " ")
 	self:call_hook_("luserslocglob", self.lusers_)
 end
@@ -459,7 +440,7 @@ end
 function client_i:handle_305_() -- * RPL_UNAWAY
 	if self.away_ then
 		self.away_ = nil
-		self:call_hook_("unaway")
+		self:call_hook_("self_unaway")
 	else
 		self:warn_("305 while not away")
 	end
@@ -475,7 +456,7 @@ function client_i:handle_306_() -- * RPL_NOWAWAY
 	else
 		self.away_ = self.away_message_sent_
 		self.away_message_sent_ = nil
-		self:call_hook_("away", self.away_)
+		self:call_hook_("self_away", self.away_)
 	end
 	if self.setting_away_ then
 		self.setting_away_:signal()
@@ -483,10 +464,7 @@ function client_i:handle_306_() -- * RPL_NOWAWAY
 	end
 end
 
-function client_i:handle_331_(client, channel, topic) -- * RPL_NOTOPIC
-	if not self:check_client_self_("331", client) then
-		return
-	end
+function client_i:handle_331_(channel, topic) -- * RPL_NOTOPIC
 	if not channel then
 		self:stop_("331 with no channel specified")
 		return
@@ -500,10 +478,7 @@ function client_i:handle_331_(client, channel, topic) -- * RPL_NOTOPIC
 	self:call_hook_("topic", self.channels_[channel])
 end
 
-function client_i:handle_332_(client, channel, topic) -- * RPL_TOPIC
-	if not self:check_client_self_("332", client) then
-		return
-	end
+function client_i:handle_332_(channel, topic) -- * RPL_TOPIC
 	if not channel then
 		self:stop_("332 with no channel specified")
 		return
@@ -521,10 +496,7 @@ function client_i:handle_332_(client, channel, topic) -- * RPL_TOPIC
 	self:call_hook_("topic", self.channels_[channel])
 end
 
-function client_i:handle_333_(client, channel, nick, setat) -- * RPL_TOPICWHOTIME
-	if not self:check_client_self_("333", client) then
-		return
-	end
+function client_i:handle_333_(channel, nick, setat) -- * RPL_TOPICWHOTIME
 	if not channel then
 		self:stop_("333 with no channel specified")
 		return
@@ -554,10 +526,7 @@ do
 		["*"] = "private",
 	}
 
-	function client_i:handle_353_(client, symbol, channel, prefixes_and_nicks) -- * RPL_NAMREPLY
-		if not self:check_client_self_("353", client) then
-			return
-		end
+	function client_i:handle_353_(symbol, channel, prefixes_and_nicks) -- * RPL_NAMREPLY
 		if not symbol then
 			self:stop_("353 with no symbol specified")
 			return
@@ -594,10 +563,7 @@ do
 	end
 end
 
-function client_i:handle_366_(client, channel) -- * RPL_ENDOFNAMES
-	if not self:check_client_self_("366", client) then
-		return
-	end
+function client_i:handle_366_(channel) -- * RPL_ENDOFNAMES
 	if not channel then
 		self:stop_("366 with no channel specified")
 		return
@@ -640,6 +606,54 @@ function client_i:handle_376_() -- * RPL_ENDOFMOTD
 	self:call_hook_("motd", self.motd_)
 end
 
+function client_i:handle_403_(channel) -- * ERR_NOSUCHCHANNEL
+	if not channel then
+		self:stop_("403 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 403
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("403 to " .. channel .. " while not joining")
+	end
+end
+
+function client_i:handle_405_(channel) -- * ERR_TOOMANYCHANNELS
+	if not channel then
+		self:stop_("405 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 405
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("405 to " .. channel .. " while not joining")
+	end
+end
+
+function client_i:handle_407_(channel) -- * ERR_TOOMANYTARGETS
+	if not channel then
+		self:stop_("407 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 407
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("407 to " .. channel .. " while not joining")
+	end
+end
+
 function client_i:handle_422_() -- * ERR_NOMOTD
 	self.motd_ = false
 	self:call_hook_("motd", self.motd_)
@@ -665,14 +679,16 @@ function client_i:handle_433_(command) -- * ERR_NICKNAMEINUSE
 	end
 end
 
-function client_i:handle_436_(command) -- * ERR_NICKCOLLISION
+function client_i:handle_436_() -- * ERR_NICKCOLLISION
 	self:stop_("nick collision")
 end
 
 function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
-	if ok_nick(nick_or_channel) then
-		local nick = self:lower(nick_or_channel)
-		-- * Assume it's a nick.
+	if not nick_or_channel then
+		self:stop_("437 with no nick or channel specified")
+		return
+	end
+	if ok_nick(nick_or_channel) then -- * Assume it's a nick.
 		if self.setting_nick_ then
 			self.set_nick_error_ = 437
 			self.setting_nick_:signal()
@@ -680,10 +696,80 @@ function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
 		else
 			self:warn_("437 while not setting nick")
 		end
-	else
+	else -- * Assume it's a channel.
 		local channel = self:lower(nick_or_channel)
-		-- * Assume it's a channel.
-		-- * TODO: handle the channel case
+		if self.joining_channel_ == channel then
+			self.join_error_ = 437
+			self.joining_:signal()
+			self.joining_ = nil
+			self.joining_channel_ = nil
+		else
+			self:warn_("437 to " .. channel .. " while not joining")
+		end
+	end
+end
+
+function client_i:handle_471_(channel) -- * ERR_CHANNELISFULL
+	if not channel then
+		self:stop_("471 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 471
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("471 to " .. channel .. " while not joining")
+	end
+end
+
+function client_i:handle_473_(channel) -- * ERR_INVITEONLYCHAN
+	if not channel then
+		self:stop_("473 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 473
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("473 to " .. channel .. " while not joining")
+	end
+end
+
+function client_i:handle_474_(channel) -- * ERR_BANNEDFROMCHAN
+	if not channel then
+		self:stop_("474 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 474
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("474 to " .. channel .. " while not joining")
+	end
+end
+
+function client_i:handle_475_(channel) -- * ERR_BADCHANNELKEY
+	if not channel then
+		self:stop_("475 with no channel specified")
+		return
+	end
+	channel = self:lower(channel)
+	if self.joining_channel_ == channel then
+		self.join_error_ = 475
+		self.joining_:signal()
+		self.joining_ = nil
+		self.joining_channel_ = nil
+	else
+		self:warn_("475 to " .. channel .. " while not joining")
 	end
 end
 
@@ -720,6 +806,11 @@ function client_i:handle_join_(channels)
 					highest_modes_ = {},
 					users_ = {},
 				}, channel_m)
+				if self.joining_channel_ == name then
+					self.joining_:signal()
+					self.joining_ = nil
+					self.joining_channel_ = nil
+				end
 				self:call_hook_("self_join", self.channels_[name])
 			else
 				self:add_user_to_channel_(name, self.last_prefix_.nick, self.last_prefix_.raw_nick)
@@ -780,12 +871,35 @@ function client_i:handle_part_(channels)
 				for nick in pairs(self.channels_[name].users_) do
 					self:remove_user_from_channel_(name, nick)
 				end
-				self.channels_[name] = nil
+				if self.parting_channel_ == name then
+					self.parting_:signal()
+					self.parting_ = nil
+					self.parting_channel_ = nil
+				end
 				self:call_hook_("self_part", self.channels_[name])
+				self.channels_[name] = nil
 			else
 				self:remove_user_from_channel_(name, self.last_prefix_.nick)
 			end
 		end
+	end
+end
+
+function client_i:handle_quit_(message)
+	if not self.last_prefix_.nick then
+		self:stop_("part with no nickname specified in prefix")
+		return
+	end
+	local user = self.users_in_channels_[self.last_prefix_.nick]
+	if not user then
+		return
+	end
+	local channels = {}
+	for name in pairs(user.channels_) do
+		table.insert(channels, name)
+	end
+	for _, name in pairs(channels) do
+		self:remove_user_from_channel_(name, self.last_prefix_.nick)
 	end
 end
 
@@ -922,19 +1036,28 @@ end
 
 function client_i:process_line_(line_without_crlf)
 	local command, params, prefix = self:parse_line_(line_without_crlf)
-	if command then
-		self:process_prefix_(prefix)
-		self:pre_handler_(command)
-		local handler = self["handle_" .. command .. "_"]
-		if handler then
-			handler(self, unpack(params))
-		else
-			local quoted_params = {}
-			for ix = 1, #params do
-				table.insert(quoted_params, ("%q"):format(params[ix]))
-			end
-			self:warn_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
+	if not command then
+		self:warn_("malformed command: " .. line_without_crlf)
+		return
+	end
+	self:process_prefix_(prefix)
+	local unpack_params_from = 1
+	if command:find("%d%d%d") then
+		if not self:check_client_self_(command, params[1]) then
+			return
 		end
+		unpack_params_from = 2
+	end
+	self:pre_handler_(command)
+	local handler = self["handle_" .. command .. "_"]
+	if handler then
+		handler(self, unpack(params, unpack_params_from))
+	else
+		local quoted_params = {}
+		for ix = unpack_params_from, #params do
+			table.insert(quoted_params, ("%q"):format(params[ix]))
+		end
+		self:warn_(("unhandled command: %s: %s %s"):format(prefix or "?", command, table.concat(quoted_params, " ")))
 	end
 end
 
@@ -1192,17 +1315,9 @@ function client_i:call_hook_(name, ...)
 	end
 end
 
-function client_i:check_client_(command, client)
+function client_i:check_client_self_(command, client)
 	if not client then
 		self:stop_(command .. " with no client specified")
-		return false
-	end
-	self.last_client_ = client
-	return true
-end
-
-function client_i:check_client_self_(command, client)
-	if not self:check_client_(command, client) then
 		return false
 	end
 	if self:lower(client) ~= self.nick_ then
@@ -1220,6 +1335,70 @@ function client_i:register_()
 	self:send_("pass", {}, self.pass_)
 	self:send_("nick", { self.raw_nick_ })
 	self:send_("user", { self.user_, "0", "*" }, self.real_)
+end
+
+do
+	local error_messages = {
+		[263] = "rate-limited",
+		[403] = "no such channel",
+		[405] = "joined too many channels",
+		[407] = "multiple matching channels exist",
+		[471] = "channel is full",
+		[473] = "invite-only channel",
+		[474] = "banned from channel",
+		[475] = "bad channel key",
+	}
+
+	function client_i:join(channel_in, key_in)
+		self:assert_chat_phase_()
+		local channel = assert_param(ok_channel, channel_in, "channel")
+		local key = assert_param_default(ok_key, key_in, "channel")
+		channel = self:lower(channel)
+		if self.channels_[channel] then
+			return true
+		end
+		if self.joining_ then
+			error("already joining", 2)
+		end
+		self.joining_ = condition.new()
+		self.joining_channel_ = channel
+		self:send_("join", { channel, key })
+		self.joining_:wait() -- * self.joining_ and self.joining_channel_ get nil'd by the time this returns.
+		local join_error = self.join_error_
+		self.join_error_ = nil
+		if join_error then
+			return nil, error_messages[join_error], join_error
+		end
+		return true
+	end
+end
+
+do
+	local error_messages = {
+		[263] = "rate-limited",
+	}
+
+	function client_i:part(channel_in)
+		self:assert_chat_phase_()
+		local channel = assert_param(ok_channel, channel_in, "channel")
+		channel = self:lower(channel)
+		if not self.channels_[channel] then
+			return true
+		end
+		if self.parting_ then
+			error("already parting", 2)
+		end
+		self.parting_ = condition.new()
+		self.parting_channel_ = channel
+		self:send_("part", { channel })
+		self.parting_:wait() -- * self.parting_ and self.parting_channel_ get nil'd by the time this returns.
+		local part_error = self.part_error_
+		self.part_error_ = nil
+		if part_error then
+			return nil, error_messages[part_error], part_error
+		end
+		return true
+	end
 end
 
 function client_i:connect()
