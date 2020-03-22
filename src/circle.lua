@@ -121,6 +121,10 @@ function channel_i:get_users()
 	return self.users_
 end
 
+function channel_i:get_user(user_in)
+	return self.users_[self.client_:lower(assert_param(ok_nonempty_string, user_in, "user"))]
+end
+
 local client_i = {}
 local client_m = { __index = client_i }
 
@@ -158,6 +162,14 @@ end
 
 function client_i:get_channels()
 	return self.channels_
+end
+
+function client_i:get_user(user_in)
+	return self.users_in_channels_[self:lower(assert_param(ok_nonempty_string, user_in, "user"))]
+end
+
+function client_i:get_channel(channel_in)
+	return self.channels_[self:lower(assert_param(ok_nonempty_string, channel_in, "channel"))]
 end
 
 function client_i:get_status()
@@ -501,11 +513,12 @@ function client_i:handle_333_(channel, nick, setat) -- * RPL_TOPICWHOTIME
 		self:stop_("333 with no channel specified")
 		return
 	end
-	channel = self:lower(channel)
 	if not nick then
 		self:stop_("333 with no nick specified")
 		return
 	end
+	channel = self:lower(channel)
+	nick = self:lower(nick)
 	if not setat then
 		self:stop_("333 with no setat specified")
 		return
@@ -850,7 +863,7 @@ function client_i:handle_notice_(target, message)
 		self:stop_("notice with no message specified")
 		return
 	end
-	self:call_hook_("notice", self.last_prefix_.nick, target, message)
+	self:call_hook_("notice", self.last_prefix_.raw_nick, target, message)
 end
 
 function client_i:handle_part_(channels)
@@ -916,7 +929,7 @@ function client_i:handle_privmsg_(target, message)
 		self:stop_("privmsg with no message specified")
 		return
 	end
-	self:call_hook_("privmsg", self.last_prefix_.nick, target, message)
+	self:call_hook_("privmsg", self.last_prefix_.raw_nick, target, message)
 end
 
 function client_i:handle_ping_(server, server2)
@@ -987,6 +1000,10 @@ end
 
 function client_i:prefix_is_self_()
 	return self.last_prefix_.nick == self.nick_
+end
+
+function client_i:is_self(nick)
+	return self:lower(nick) == self.nick_
 end
 
 function client_i:parse_line_(line_without_crlf)

@@ -31,6 +31,18 @@ client:hook("warn", function(self, warn_reason)
 	print("WARN: " .. warn_reason)
 end)
 
+client:hook("privmsg", function(self, source, target, message)
+	if self:is_self(target) then
+		self:privmsg(source, message)
+	elseif self:get_channel(target) then
+		local nick = self:get_nick()
+		local before, after = message:sub(1, #nick), message:sub(#nick + 1)
+		if self:lower(before) == nick and after:find("^%W") then
+			self:privmsg(target, source .. ": " .. after:match("^%W+(.-)$"))
+		end
+	end
+end)
+
 queue:wrap(function()
 	client:connect()
 
