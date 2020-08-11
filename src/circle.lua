@@ -63,8 +63,8 @@ local function assert_param_default(ok, thing, name)
 	return thing and (ok(thing) and thing or error("invalid " .. name, 3)) or nil
 end
 -- * The folowing ok_* functions aren't actually enough to validate strings
---   on the semantics level, but they're enough to validate them on the protocol
---   level. If we send strings as parameters deemed valid by these, we'll at
+--   on the semantic level, but they're enough to validate them on the protocol
+--   level. If we send strings deemed valid by these as parameters, we'll at
 --   least get real errors back instead of the server cutting us off due to
 --   'not being able to speak IRC'.
 local function ok_key(str)
@@ -86,8 +86,17 @@ end
 local user_i = {}
 local user_m = { __index = user_i }
 
+function user_i:set_away_(away)
+	self.away_ = away
+	self:call_hook_("user_away", self)
+end
+
 function user_i:get_name()
 	return self.name_
+end
+
+function user_i:get_away()
+	return self.away_
 end
 
 function user_i:get_raw_name()
@@ -123,6 +132,21 @@ end
 
 function channel_i:get_user(user_in)
 	return self.users_[self.client_:lower(assert_param(ok_nonempty_string, user_in, "user"))]
+end
+
+function channel_i:set_who_tracking(track)
+	if track and not self.client_.who_channels_[self.name_] then
+		self.client_.who_channels_[self.name_] = true
+		self.client_:recalculate_who_set_cover_()
+	end
+	if not track and self.client_.who_channels_[self.name_] then
+		self.client_.who_channels_[self.name_] = nil
+		self.client_:recalculate_who_set_cover_()
+	end
+end
+
+function channel_i:get_who_tracking()
+	return self.client_.who_channels_[self.name_]
 end
 
 local client_i = {}
@@ -190,7 +214,6 @@ function client_i:lower(str)
 end
 
 function client_i:send_(command, middles, trailing, prefix)
-	-- * TODO: parameter checking
 	if self.status_ ~= "running" then
 		return
 	end
@@ -293,7 +316,7 @@ end
 function client_i:handle_005_(...) -- * RPL_ISUPPORT, hopefully
 	if not self.receiving_isupport_ and self.isupport_tokens_ then
 		-- * TODO: handle these, stop when casemapping randomly changes, etc.
-		self:warn_("005 when ISUPPORT tokens already received")
+		self:stop_("005 when ISUPPORT tokens already received")
 		return
 	end
 	self.receiving_isupport_ = true
@@ -438,14 +461,15 @@ function client_i:handle_266_(...) -- * RPL_GLOBALUSERS
 	self:call_hook_("luserslocglob", self.lusers_)
 end
 
-function client_i:handle_301_(nick) -- * RPL_AWAY
+function client_i:handle_301_(nick, message) -- * RPL_AWAY
 	if not nick then
 		self:stop_("301 with no nick specified")
 		return
 	end
 	nick = self:lower(nick)
-	if self.users_in_channels_[nick] then
-		-- * TODO: update away status
+	local user = self.users_in_channels_[nick]
+	if user then
+		user:set_away_(message)
 	end
 end
 
@@ -570,7 +594,7 @@ do
 				self:add_user_to_channel_(channel, nick, raw_nick)
 				self.channels_[channel].highest_modes_[nick] = prefix_mode
 			else
-				self:warn_("invalid nick-prefix pair in 353: " .. prefix_and_nick)
+				self:stop_("invalid nick-prefix pair in 353: " .. prefix_and_nick)
 			end
 		end
 	end
@@ -818,6 +842,7 @@ function client_i:handle_join_(channels)
 					raw_name_ = raw_name,
 					highest_modes_ = {},
 					users_ = {},
+					user_count_ = 0,
 				}, channel_m)
 				if self.joining_channel_ == name then
 					self.joining_:signal()
@@ -881,8 +906,13 @@ function client_i:handle_part_(channels)
 			self:warn_("channel " .. name .. " in part list while not joined")
 		else
 			if self:prefix_is_self_() then
-				for nick in pairs(self.channels_[name].users_) do
-					self:remove_user_from_channel_(name, nick)
+				self.channels_[name]:set_who_tracking(false)
+				local user_names = {}
+				for user_name in pairs(self.channels_[name].users_) do
+					table.insert(user_names, user_name)
+				end
+				for ix = 1, #user_names do
+					self:remove_user_from_channel_(name, user_names[ix])
 				end
 				if self.parting_channel_ == name then
 					self.parting_:signal()
@@ -948,7 +978,7 @@ function client_i:pre_handler_(command) -- * Used for edge-triggering.
 	if self.isupport_tokens_ and command ~= "005" then
 		self.receiving_isupport_ = nil
 		if not next(self.isupport_tokens_) then
-			-- * TODO: handle this somehow
+			-- * TODO: default to something sane
 			self:warn_("server sent no ISUPPORT tokens")
 			self.compat_flags_.no_isupport = true
 		end
@@ -976,13 +1006,40 @@ function client_i:dispatch_()
 	end
 end
 
+function client_i:recalculate_who_set_cover_()
+	self.who_set_cover_ = {}
+	local channels_by_size = {}
+	local unaccounted_for = {}
+	for channel_name in pairs(self.who_channels_) do
+		table.insert(channels_by_size, channel_name)
+		for name in pairs(self.channels_[channel_name].users_) do
+			unaccounted_for[name] = true
+		end
+	end
+	table.sort(channels_by_size, function(lhs, rhs)
+		return self.channels_[lhs].user_count_ > self.channels_[rhs].user_count_
+	end)
+	for ix = 1, #channels_by_size do
+		local channel_name = channels_by_size[ix]
+		table.insert(self.who_set_cover_, channel_name)
+		for name in pairs(self.channels_[channel_name].users_) do
+			unaccounted_for[name] = nil
+		end
+		if not next(unaccounted_for) then
+			break
+		end
+	end
+end
+
 function client_i:remove_user_from_channel_(channel, nick)
 	self.channels_[channel].users_[nick] = nil
+	self.channels_[channel].user_count_ = self.channels_[channel].user_count_ - 1
 	self.users_in_channels_[nick].channels_[channel] = nil
 	if not next(self.users_in_channels_[nick].channels_) then
 		self:call_hook_("user_disappear", self.users_in_channels_[nick])
 		self.users_in_channels_[nick] = nil
 	end
+	self:recalculate_who_set_cover_()
 end
 
 function client_i:add_user_to_channel_(channel, nick, raw_nick)
@@ -991,11 +1048,14 @@ function client_i:add_user_to_channel_(channel, nick, raw_nick)
 			name_ = nick,
 			raw_name_ = raw_nick,
 			channels_ = {},
+			away_ = false,
 		}, user_m)
 		self:call_hook_("user_appear", self.users_in_channels_[nick])
 	end
 	self.channels_[channel].users_[nick] = self.users_in_channels_[nick]
+	self.channels_[channel].user_count_ = self.channels_[channel].user_count_ + 1
 	self.users_in_channels_[nick].channels_[channel] = true
+	self:recalculate_who_set_cover_()
 end
 
 function client_i:prefix_is_self_()
@@ -1054,7 +1114,7 @@ end
 function client_i:process_line_(line_without_crlf)
 	local command, params, prefix = self:parse_line_(line_without_crlf)
 	if not command then
-		self:warn_("malformed command: " .. line_without_crlf)
+		self:stop_("malformed command: " .. line_without_crlf)
 		return
 	end
 	self:process_prefix_(prefix)
@@ -1509,6 +1569,8 @@ local function make_client(params_in)
 		casemapping_ = "rfc1459-strict",
 		prefix_mode_to_letter_ = { ["o"] = "@", ["v"] = "+" },
 		prefix_letter_to_mode_ = { ["@"] = "o", ["+"] = "v" },
+		who_channels_ = {},
+		who_set_cover_ = {},
 	}, client_m)
 	client.nick_ = client:lower(client.raw_nick_)
 	return client

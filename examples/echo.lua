@@ -7,7 +7,6 @@ local condition = require("cqueues.condition")
 
 local queue = cqueues.new()
 
-math.randomseed(os.time())
 local client = circle.client({
 	host = my_config.host,
 	port = my_config.port,
@@ -29,6 +28,11 @@ end)
 
 client:hook("warn", function(self, warn_reason)
 	print("WARN: " .. warn_reason)
+end)
+
+client:hook("self_join", function(self, channel)
+	channel:set_who_tracking(true)
+	print("enabled who-tracking on " .. channel:get_name())
 end)
 
 client:hook("privmsg", function(self, source, target, message)
