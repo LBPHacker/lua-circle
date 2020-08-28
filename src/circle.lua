@@ -47,6 +47,12 @@ end
 local function ok_integer(num)
 	return type(num) == "number" and math.floor(num) == num
 end
+local function ok_positive_integer(num)
+	return ok_integer(num) and num > 0
+end
+local function ok_port(num)
+	return ok_integer(num) and num > 0 and num < 65535
+end
 local function ok_table(tbl)
 	return type(tbl) == "table"
 end
@@ -87,8 +93,10 @@ local user_i = {}
 local user_m = { __index = user_i }
 
 function user_i:set_away_(away)
-	self.away_ = away
-	self:call_hook_("user_away", self)
+	if self.away_ ~= away then
+		self.away_ = away
+		self.client_:call_hook_("user_away", self)
+	end
 end
 
 function user_i:get_name()
@@ -101,6 +109,10 @@ end
 
 function user_i:get_raw_name()
 	return self.raw_name_
+end
+
+function user_i:whois()
+	-- * TODO
 end
 
 local channel_i = {}
@@ -247,13 +259,19 @@ function client_i:warn_(message)
 	self:call_hook_("warn", message)
 end
 
+function client_i:assert_message_param_(command, name, value)
+	if not value then
+		self:stop_(command .. " with no " .. name .. " specified")
+	end
+end
+
 function client_i:handle_001_(welcome) -- * RPL_WELCOME
-	if self.registered_ then
-		self:stop_("001 when already registered")
+	self:assert_message_param_("001", "welcome line", welcome)
+	if self.status_ == "dead" then
 		return
 	end
-	if not welcome then
-		self:stop_("001 with no welcome line")
+	if self.registered_ then
+		self:stop_("001 when already registered")
 		return
 	end
 	self.welcome_ = {}
@@ -263,48 +281,39 @@ function client_i:handle_001_(welcome) -- * RPL_WELCOME
 end
 
 function client_i:handle_002_(yourhost) -- * RPL_YOURHOST
-	if not self.welcome_ then
-		self:stop_("002 before 001")
+	self:assert_message_param_("002", "yourhost line", yourhost)
+	if self.status_ == "dead" then
 		return
 	end
-	if not yourhost then
-		self:stop_("002 with no yourhost line")
+	if not self.welcome_ then
+		self:stop_("002 before 001")
 		return
 	end
 	self.welcome_.yourhost = yourhost
 end
 
 function client_i:handle_003_(created) -- * RPL_CREATED
-	if not self.welcome_ then
-		self:stop_("003 before 001")
+	self:assert_message_param_("003", "created line", created)
+	if self.status_ == "dead" then
 		return
 	end
-	if not created then
-		self:stop_("003 with no created line")
+	if not self.welcome_ then
+		self:stop_("003 before 001")
 		return
 	end
 	self.welcome_.created = created
 end
 
 function client_i:handle_004_(server_name, server_version, user_modes, channel_modes) -- * RPL_MYINFO
+	self:assert_message_param_("004", "server name", server_name)
+	self:assert_message_param_("004", "server version", server_version)
+	self:assert_message_param_("004", "user modes", user_modes)
+	self:assert_message_param_("004", "channel modes", channel_modes)
+	if self.status_ == "dead" then
+		return
+	end
 	if not self.welcome_ then
 		self:stop_("004 before 001")
-		return
-	end
-	if not server_name then
-		self:stop_("004 with no server name specified")
-		return
-	end
-	if not server_version then
-		self:stop_("004 with no server version specified")
-		return
-	end
-	if not user_modes then
-		self:stop_("004 with no user modes specified")
-		return
-	end
-	if not channel_modes then
-		self:stop_("004 with no channel modes specified")
 		return
 	end
 	self.welcome_.server_name = server_name
@@ -412,6 +421,10 @@ function client_i:handle_255_(...) -- * RPL_LUSERME
 end
 
 function client_i:handle_263_(command) -- * RPL_TRYAGAIN
+	self:assert_message_param_("263", "command", command)
+	if self.status_ == "dead" then
+		return
+	end
 	if command == "nick" then
 		if self.setting_nick_ then
 			self.set_nick_error_ = 263
@@ -446,6 +459,15 @@ function client_i:handle_263_(command) -- * RPL_TRYAGAIN
 		else
 			self:warn_("263 to part while not parting")
 		end
+	elseif command == "who" then
+		if self.doing_who_ then
+			self.who_error_ = 263
+			self.doing_who_:signal()
+			self.doing_who_ = nil
+			self.doing_who_on_ = nil
+		else
+			self:warn_("263 to who while not doing who")
+		end
 	else
 		self:warn_("263 to " .. command)
 	end
@@ -462,8 +484,8 @@ function client_i:handle_266_(...) -- * RPL_GLOBALUSERS
 end
 
 function client_i:handle_301_(nick, message) -- * RPL_AWAY
-	if not nick then
-		self:stop_("301 with no nick specified")
+	self:assert_message_param_("301", "nick", nick)
+	if self.status_ == "dead" then
 		return
 	end
 	nick = self:lower(nick)
@@ -500,9 +522,23 @@ function client_i:handle_306_() -- * RPL_NOWAWAY
 	end
 end
 
-function client_i:handle_331_(channel, topic) -- * RPL_NOTOPIC
-	if not channel then
-		self:stop_("331 with no channel specified")
+function client_i:handle_315_(channel) -- * RPL_ENDOFWHO
+	self:assert_message_param_("315", "channel", channel)
+	if self.status_ == "dead" then
+		return
+	end
+	if self.doing_who_on_ ~= channel then
+		self:warn_("315 while not doing who")
+		return
+	end
+	self.doing_who_:signal()
+	self.doing_who_ = nil
+	self.doing_who_on_ = nil
+end
+
+function client_i:handle_331_(channel) -- * RPL_NOTOPIC
+	self:assert_message_param_("331", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -515,15 +551,12 @@ function client_i:handle_331_(channel, topic) -- * RPL_NOTOPIC
 end
 
 function client_i:handle_332_(channel, topic) -- * RPL_TOPIC
-	if not channel then
-		self:stop_("332 with no channel specified")
+	self:assert_message_param_("332", "channel", channel)
+	self:assert_message_param_("332", "topic", topic)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
-	if not topic then
-		self:stop_("332 with no topic specified")
-		return
-	end
 	if not self.channels_[channel] then
 		self:warn_("332 for channel " .. channel .. " while not joined")
 		return
@@ -533,20 +566,14 @@ function client_i:handle_332_(channel, topic) -- * RPL_TOPIC
 end
 
 function client_i:handle_333_(channel, nick, setat) -- * RPL_TOPICWHOTIME
-	if not channel then
-		self:stop_("333 with no channel specified")
-		return
-	end
-	if not nick then
-		self:stop_("333 with no nick specified")
+	self:assert_message_param_("333", "channel", channel)
+	self:assert_message_param_("333", "nick", nick)
+	self:assert_message_param_("333", "setat", setat)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
 	nick = self:lower(nick)
-	if not setat then
-		self:stop_("333 with no setat specified")
-		return
-	end
 	if not self.channels_[channel] then
 		self:warn_("333 for channel " .. channel .. " while not joined")
 		return
@@ -554,6 +581,30 @@ function client_i:handle_333_(channel, nick, setat) -- * RPL_TOPICWHOTIME
 	self.channels_[channel].topic_by_ = nick
 	self.channels_[channel].topic_at_ = setat
 	self:call_hook_("topicwhotime", self.channels_[channel])
+end
+
+function client_i:handle_352_(channel, usern, host, server, nick, status, hops_and_real) -- * RPL_WHOREPLY
+	self:assert_message_param_("352", "channel", channel)
+	self:assert_message_param_("352", "user", usern)
+	self:assert_message_param_("352", "host", host)
+	self:assert_message_param_("352", "server", server)
+	self:assert_message_param_("352", "nick", nick)
+	self:assert_message_param_("352", "status", status)
+	self:assert_message_param_("352", "hops and realname", hops_and_real)
+	if self.status_ == "dead" then
+		return
+	end
+	channel = self:lower(channel)
+	nick = self:lower(nick)
+	if self.doing_who_on_ ~= channel then
+		self:warn_("352 while not doing who")
+		return
+	end
+	local user = self.users_in_channels_[nick]
+	if user then
+		-- * TODO: handle similarly to whoisreply
+		user:set_away_(status:find("G") and true)
+	end
 end
 
 do
@@ -564,19 +615,13 @@ do
 	}
 
 	function client_i:handle_353_(symbol, channel, prefixes_and_nicks) -- * RPL_NAMREPLY
-		if not symbol then
-			self:stop_("353 with no symbol specified")
-			return
-		end
-		if not channel then
-			self:stop_("353 with no channel specified")
+		self:assert_message_param_("353", "symbol", symbol)
+		self:assert_message_param_("353", "channel", channel)
+		self:assert_message_param_("353", "nicks", prefixes_and_nicks)
+		if self.status_ == "dead" then
 			return
 		end
 		channel = self:lower(channel)
-		if not prefixes_and_nicks then
-			self:stop_("353 with no nicks specified")
-			return
-		end
 		if not self.channels_[channel] then
 			self:warn_("353 for channel " .. channel .. " while not joined")
 			return
@@ -601,8 +646,8 @@ do
 end
 
 function client_i:handle_366_(channel) -- * RPL_ENDOFNAMES
-	if not channel then
-		self:stop_("366 with no channel specified")
+	self:assert_message_param_("366", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -614,12 +659,12 @@ function client_i:handle_366_(channel) -- * RPL_ENDOFNAMES
 end
 
 function client_i:handle_372_(motd_line) -- * RPL_MOTD
-	if not self.receiving_motd_ then
-		self:stop_("372 while not receiving motd")
+	self:assert_message_param_("372", "motd line", motd_line)
+	if self.status_ == "dead" then
 		return
 	end
-	if not motd_line then
-		self:stop_("372 with no motd line")
+	if not self.receiving_motd_ then
+		self:stop_("372 while not receiving motd")
 		return
 	end
 	table.insert(self.motd_, motd_line)
@@ -644,8 +689,8 @@ function client_i:handle_376_() -- * RPL_ENDOFMOTD
 end
 
 function client_i:handle_403_(channel) -- * ERR_NOSUCHCHANNEL
-	if not channel then
-		self:stop_("403 with no channel specified")
+	self:assert_message_param_("403", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -660,8 +705,8 @@ function client_i:handle_403_(channel) -- * ERR_NOSUCHCHANNEL
 end
 
 function client_i:handle_405_(channel) -- * ERR_TOOMANYCHANNELS
-	if not channel then
-		self:stop_("405 with no channel specified")
+	self:assert_message_param_("405", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -676,8 +721,8 @@ function client_i:handle_405_(channel) -- * ERR_TOOMANYCHANNELS
 end
 
 function client_i:handle_407_(channel) -- * ERR_TOOMANYTARGETS
-	if not channel then
-		self:stop_("407 with no channel specified")
+	self:assert_message_param_("407", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -696,7 +741,7 @@ function client_i:handle_422_() -- * ERR_NOMOTD
 	self:call_hook_("motd", self.motd_)
 end
 
-function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
+function client_i:handle_432_() -- * ERR_ERRONEUSNICKNAME
 	if self.setting_nick_ then
 		self.set_nick_error_ = 432
 		self.setting_nick_:signal()
@@ -706,7 +751,7 @@ function client_i:handle_432_(command) -- * ERR_ERRONEUSNICKNAME
 	end
 end
 
-function client_i:handle_433_(command) -- * ERR_NICKNAMEINUSE
+function client_i:handle_433_() -- * ERR_NICKNAMEINUSE
 	if self.setting_nick_ then
 		self.set_nick_error_ = 433
 		self.setting_nick_:signal()
@@ -721,8 +766,8 @@ function client_i:handle_436_() -- * ERR_NICKCOLLISION
 end
 
 function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
-	if not nick_or_channel then
-		self:stop_("437 with no nick or channel specified")
+	self:assert_message_param_("437", "nick or channel", nick_or_channel)
+	if self.status_ == "dead" then
 		return
 	end
 	if ok_nick(nick_or_channel) then -- * Assume it's a nick.
@@ -747,8 +792,8 @@ function client_i:handle_437_(nick_or_channel) -- * ERR_UNAVAILRESOURCE
 end
 
 function client_i:handle_471_(channel) -- * ERR_CHANNELISFULL
-	if not channel then
-		self:stop_("471 with no channel specified")
+	self:assert_message_param_("471", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -763,8 +808,8 @@ function client_i:handle_471_(channel) -- * ERR_CHANNELISFULL
 end
 
 function client_i:handle_473_(channel) -- * ERR_INVITEONLYCHAN
-	if not channel then
-		self:stop_("473 with no channel specified")
+	self:assert_message_param_("473", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -779,8 +824,8 @@ function client_i:handle_473_(channel) -- * ERR_INVITEONLYCHAN
 end
 
 function client_i:handle_474_(channel) -- * ERR_BANNEDFROMCHAN
-	if not channel then
-		self:stop_("474 with no channel specified")
+	self:assert_message_param_("474", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -795,8 +840,8 @@ function client_i:handle_474_(channel) -- * ERR_BANNEDFROMCHAN
 end
 
 function client_i:handle_475_(channel) -- * ERR_BADCHANNELKEY
-	if not channel then
-		self:stop_("475 with no channel specified")
+	self:assert_message_param_("475", "channel", channel)
+	if self.status_ == "dead" then
 		return
 	end
 	channel = self:lower(channel)
@@ -811,7 +856,6 @@ function client_i:handle_475_(channel) -- * ERR_BADCHANNELKEY
 end
 
 function client_i:handle_484_() -- * ERR_RESTRICTED
-	-- * TODO: handle other cases
 	if self.setting_nick_ then
 		self.set_nick_error_ = 484
 		self.setting_nick_:signal()
@@ -822,12 +866,12 @@ function client_i:handle_484_() -- * ERR_RESTRICTED
 end
 
 function client_i:handle_join_(channels)
-	if not self.last_prefix_.nick then
-		self:stop_("join with no nickname specified in prefix")
+	self:assert_message_param_("join", "channels", channels)
+	if self.status_ == "dead" then
 		return
 	end
-	if not channels then
-		self:stop_("join with no channels specified")
+	if not self.last_prefix_.nick then
+		self:stop_("join with no nickname specified in prefix")
 		return
 	end
 	for raw_name in channels:gmatch("[^,]+") do
@@ -858,12 +902,12 @@ function client_i:handle_join_(channels)
 end
 
 function client_i:handle_nick_(new)
-	if not self.last_prefix_.nick then
-		self:stop_("nick with no nickname specified in prefix")
+	self:assert_message_param_("nick", "new nickname", new)
+	if self.status_ == "dead" then
 		return
 	end
-	if not new then
-		self:stop_("nick with no new nickname specified")
+	if not self.last_prefix_.nick then
+		self:stop_("nick with no nickname specified in prefix")
 		return
 	end
 	if self:prefix_is_self_() then
@@ -876,28 +920,25 @@ function client_i:handle_nick_(new)
 end
 
 function client_i:handle_notice_(target, message)
+	self:assert_message_param_("notice", "target", target)
+	self:assert_message_param_("notice", "message", message)
+	if self.status_ == "dead" then
+		return
+	end
 	if not self.last_prefix_.nick then
 		self:stop_("notice with no nickname specified in prefix")
-		return
-	end
-	if not target then
-		self:stop_("notice with no target specified")
-		return
-	end
-	if not message then
-		self:stop_("notice with no message specified")
 		return
 	end
 	self:call_hook_("notice", self.last_prefix_.raw_nick, target, message)
 end
 
 function client_i:handle_part_(channels)
-	if not self.last_prefix_.nick then
-		self:stop_("part with no nickname specified in prefix")
+	self:assert_message_param_("part", "channels", channels)
+	if self.status_ == "dead" then
 		return
 	end
-	if not channels then
-		self:stop_("part with no channels specified")
+	if not self.last_prefix_.nick then
+		self:stop_("part with no nickname specified in prefix")
 		return
 	end
 	for raw_name in channels:gmatch("[^,]+") do
@@ -929,6 +970,7 @@ function client_i:handle_part_(channels)
 end
 
 function client_i:handle_quit_(message)
+	-- * TODO: do something with optional quit message
 	if not self.last_prefix_.nick then
 		self:stop_("part with no nickname specified in prefix")
 		return
@@ -947,24 +989,21 @@ function client_i:handle_quit_(message)
 end
 
 function client_i:handle_privmsg_(target, message)
+	self:assert_message_param_("privmsg", "target", target)
+	self:assert_message_param_("privmsg", "message", message)
+	if self.status_ == "dead" then
+		return
+	end
 	if not self.last_prefix_.nick then
 		self:stop_("privmsg with no nickname specified in prefix")
-		return
-	end
-	if not target then
-		self:stop_("privmsg with no target specified")
-		return
-	end
-	if not message then
-		self:stop_("privmsg with no message specified")
 		return
 	end
 	self:call_hook_("privmsg", self.last_prefix_.raw_nick, target, message)
 end
 
 function client_i:handle_ping_(server, server2)
-	if not server then
-		self:stop_("ping with no server specified")
+	self:assert_message_param_("ping", "server", server)
+	if self.status_ == "dead" then
 		return
 	end
 	if server2 then
@@ -1408,6 +1447,28 @@ function client_i:disconnect_()
 	self.client_socket_:close()
 end
 
+function client_i:do_who_()
+	local who_channels_cursor = 1
+	while self.status_ == "running" do
+		local ready = assert(cqueues.poll(self.stopping_cond_, self.who_interval_))
+		if ready ~= self.stopping_cond_ and #self.who_channels_ > 0 then
+			if who_channels_cursor > #self.who_channels_ then
+				who_channels_cursor = 1
+			end
+			local channel = self.who_channels_[who_channels_cursor]
+			self.doing_who_ = condition.new()
+			self.doing_who_on_ = channel
+			self:send_("who", { channel })
+			self.doing_who_:wait() -- * self.doing_who_ and self.doing_who_on_ get nil'd by the time this returns.
+			local who_error = self.who_error_
+			self.who_error_ = nil
+			if not who_error then
+				who_channels_cursor = who_channels_cursor + 1
+			end
+		end
+	end
+end
+
 function client_i:register_()
 	self:send_("pass", {}, self.pass_)
 	self:send_("nick", { self.raw_nick_ })
@@ -1508,6 +1569,9 @@ function client_i:connect()
 	self.connecting_ = false
 	self.queue_:wrap(function()
 		self:register_()
+		self.queue_:wrap(function()
+			self:do_who_()
+		end)
 	end)
 	self.queue_:wrap(function()
 		self:dispatch_()
@@ -1549,7 +1613,7 @@ local function make_client(params_in)
 	local params = assert_param(ok_table, params_in, "params")
 	local client = setmetatable({
 		host_ = assert_param(ok_nonempty_string, params.host, "host"),
-		port_ = assert_param(ok_integer, params.port, "port"),
+		port_ = assert_param(ok_port, params.port, "port"),
 		user_ = assert_param(ok_user, params.user, "user"),
 		raw_nick_ = assert_param(ok_nick, params.nick, "nick"),
 		pass_ = assert_param(ok_nonempty_string, params.pass, "pass"),
@@ -1558,7 +1622,7 @@ local function make_client(params_in)
 		use_tls_ = params.tls and true or false,
 		tls_ctx_ = params.tls and (assert_param_default(ok_openssl_context, params.tls_ctx, "tls_ctx") or make_tls_context()),
 		queue_ = assert_param_default(ok_cqueues_controller, params.queue, "queue") or cqueues.new(),
-		message_size_limit_ = assert_param_default(ok_integer, params.message_size_limit, "message_size_limit") or 512,
+		message_size_limit_ = assert_param_default(ok_positive_integer, params.message_size_limit, "message_size_limit") or 512,
 		default_quit_message_ = "quit",
 		default_away_message_ = "away",
 		hooks_ = {},
@@ -1571,6 +1635,8 @@ local function make_client(params_in)
 		prefix_letter_to_mode_ = { ["@"] = "o", ["+"] = "v" },
 		who_channels_ = {},
 		who_set_cover_ = {},
+		who_interval_ = assert_param_default(ok_positive_integer, params.who_interval, "who_interval") or 60,
+		whois_cache_timeout_ = assert_param_default(ok_positive_integer, params.whois_cache_timeout, "whois_cache_timeout") or 60,
 	}, client_m)
 	client.nick_ = client:lower(client.raw_nick_)
 	return client
