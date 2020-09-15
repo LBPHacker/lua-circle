@@ -1088,6 +1088,7 @@ function client_i:add_user_to_channel_(channel, nick, raw_nick)
 			raw_name_ = raw_nick,
 			channels_ = {},
 			away_ = false,
+			client_ = self,
 		}, user_m)
 		self:call_hook_("user_appear", self.users_in_channels_[nick])
 	end
