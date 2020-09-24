@@ -1,3 +1,6 @@
+--- IRC client objects.
+-- @classmod circle.client
+
 local cqueues = require("cqueues")
 local socket = require("cqueues.socket")
 local condition = require("cqueues.condition")
@@ -1610,7 +1613,7 @@ local function make_tls_context()
 	return ctx
 end
 
-local function make_client(params_in)
+local function client(params_in)
 	local params = assert_param(ok_table, params_in, "params")
 	local client = setmetatable({
 		host_ = assert_param(ok_nonempty_string, params.host, "host"),
@@ -1644,5 +1647,5 @@ local function make_client(params_in)
 end
 
 return {
-	client = make_client
+	client = client,
 }

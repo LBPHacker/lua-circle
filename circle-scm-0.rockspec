@@ -2,7 +2,7 @@ package = "circle"
 version = "scm-0"
 
 description = {
-	summary = "Coolest IRC Library Ever",
+	summary = "Cqueues IRC Library Extraordinaire",
 	homepage = "https://github.com/LBPHacker/lua-circle",
 	license = "MIT"
 }
@@ -20,6 +20,7 @@ dependencies = {
 build = {
 	type = "builtin",
 	modules = {
-		["circle"] = "src/circle.lua",
+		["circle"] = "src/circle/init.lua",
+		["circle.client"] = "src/circle/client.lua",
 	}
 }
