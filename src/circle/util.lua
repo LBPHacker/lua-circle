@@ -114,6 +114,11 @@ local function valid_target(target)
 	return valid_nick(target) or valid_channel(target)
 end
 
+local function valid_pinginfo(info)
+	-- * TODO: confirm correctness and also correctness of usage
+	return type(info) == "string" and not info:find("[\0\r\n]")
+end
+
 local function clean(tbl)
 	while next(tbl) do
 		tbl[next(tbl)] = nil
@@ -138,5 +143,6 @@ return {
 	valid_account = valid_account,
 	valid_message = valid_message,
 	valid_target = valid_target,
+	valid_pinginfo = valid_pinginfo,
 	clean = clean,
 }

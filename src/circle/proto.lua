@@ -216,6 +216,16 @@ end
 
 local command_checks = {}
 
+function command_checks.ping(server, server2)
+	if not util.valid_pinginfo(server) then
+		return nil, "PING command with invalid server field"
+	end
+	if server2 ~= nil and not util.valid_pinginfo(server2) then
+		return nil, "PING command with invalid server2 field"
+	end
+	return true
+end
+
 function command_checks.privmsg(target, message)
 	if not util.valid_target(target) then
 		return nil, "PRIVMSG command with invalid target field"

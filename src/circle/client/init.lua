@@ -9,6 +9,10 @@ local ssl = require("openssl.ssl")
 local client_i = {}
 local client_m = { __index = client_i }
 
+function client_i:last_prefix()
+	return self.last_prefix_
+end
+
 function client_i:channel(chan)
 	assert(type(chan) == "string", "argument #1 is not a string")
 	return self.channels_[self:lower(chan)]
@@ -469,8 +473,13 @@ function client_i:handle_RPL_TOPIC_(chan, topic)
 	return true
 end
 
-function client_i:last_prefix()
-	return self.last_prefix_
+function client_i:handle_ping_(server, server2)
+	if server2 then
+		self:send_("pong", { server }, server2)
+	else
+		self:send_("pong", {}, server)
+	end
+	return true
 end
 
 function client_i:handle_nick_(nick)
