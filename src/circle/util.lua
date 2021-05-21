@@ -104,6 +104,16 @@ local function valid_account(account)
 	return type(account) == "string" and not account:find("[\0\r\n]")
 end
 
+local function valid_message(message)
+	-- * TODO: confirm correctness and also correctness of usage
+	return type(message) == "string" and not message:find("[\0\r\n]")
+end
+
+local function valid_target(target)
+	-- * TODO: confirm correctness and also correctness of usage
+	return valid_nick(target) or valid_channel(target)
+end
+
 local function clean(tbl)
 	while next(tbl) do
 		tbl[next(tbl)] = nil
@@ -126,5 +136,7 @@ return {
 	valid_list = valid_list,
 	valid_key = valid_key,
 	valid_account = valid_account,
+	valid_message = valid_message,
+	valid_target = valid_target,
 	clean = clean,
 }

@@ -216,6 +216,26 @@ end
 
 local command_checks = {}
 
+function command_checks.privmsg(target, message)
+	if not util.valid_target(target) then
+		return nil, "PRIVMSG command with invalid target field"
+	end
+	if not util.valid_message(message) then
+		return nil, "PRIVMSG command with invalid message field"
+	end
+	return true
+end
+
+function command_checks.notice(target, message)
+	if not util.valid_target(target) then
+		return nil, "NOTICE command with invalid target field"
+	end
+	if not util.valid_message(message) then
+		return nil, "NOTICE command with invalid message field"
+	end
+	return true
+end
+
 function command_checks.nick(nick)
 	if not util.valid_nick(nick) then
 		return nil, "NICK command with invalid nick field"

@@ -329,6 +329,34 @@ function client_i:handle_RPL_NAMREPLY_(visibility, chan, list)
 	return true
 end
 
+function client_i:handle_privmsg_(target, message)
+	if self:is_self(target) then
+		self:trigger_self_privmsg_(message)
+	else
+		local ichan = self:lower(target)
+		local channel = self.channels_[ichan]
+		if not channel then
+			return nil, "PRIVMSG command with channel not yet joined"
+		end
+		self:trigger_channel_privmsg_(channel, message)
+	end
+	return true
+end
+
+function client_i:handle_notice_(target, message)
+	if self:is_self(target) then
+		self:trigger_self_notice_(message)
+	else
+		local ichan = self:lower(target)
+		local channel = self.channels_[ichan]
+		if not channel then
+			return nil, "NOTICE command with channel not yet joined"
+		end
+		self:trigger_channel_notice_(channel, message)
+	end
+	return true
+end
+
 function client_i:handle_RPL_ENDOFNAMES_(chan)
 	local ichan = self:lower(chan)
 	local channel = self.channels_[ichan]
@@ -439,6 +467,10 @@ function client_i:handle_RPL_TOPIC_(chan, topic)
 		self:trigger_channel_topic_(channel)
 	end
 	return true
+end
+
+function client_i:last_prefix()
+	return self.last_prefix_
 end
 
 function client_i:handle_nick_(nick)
@@ -785,6 +817,32 @@ function client_i:queue_0_quit_(message)
 	self:multisend_({ { "quit", {}, message or "bye" } })
 	self:close_()
 	self.status_ = "dead"
+	return true
+end
+
+function client_i:privmsg(target, message)
+	if self.status_ ~= "running" then
+		return nil, "not running"
+	end
+	assert(util.valid_target(target), "argument #1 is invalid")
+	assert(util.valid_message(message), "argument #2 is invalid")
+	local ok, err = self:multisend_({ { "privmsg", { target }, message } })
+	if not ok then
+		return nil, "send failed: " .. err
+	end
+	return true
+end
+
+function client_i:notice(target, message)
+	if self.status_ ~= "running" then
+		return nil, "not running"
+	end
+	assert(util.valid_target(target), "argument #1 is invalid")
+	assert(util.valid_message(message), "argument #2 is invalid")
+	local ok, err = self:multisend_({ { "notice", { target }, message } })
+	if not ok then
+		return nil, "send failed: " .. err
+	end
 	return true
 end
 
