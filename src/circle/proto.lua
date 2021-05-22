@@ -424,6 +424,7 @@ for name, init in pairs({
 end
 
 local function lower(mapping, str)
+	-- * TODO: handle errors at call sites
 	local out = {}
 	local ok, err = pcall(function()
 		for _, ch in utf8.codes(str) do

@@ -101,8 +101,10 @@ define_hook("command")
 define_hook("unknown_command")
 define_hook("self_privmsg")
 define_hook("channel_privmsg")
+define_hook("unknown_privmsg")
 define_hook("self_notice")
 define_hook("channel_notice")
+define_hook("unknown_notice")
 define_hook("channel_topic")
 define_hook("die")
 define_hook("other_quit")
@@ -118,14 +120,15 @@ function client_i:check_command_(command, ...)
 			return
 		end
 		if self:lower(client) ~= self.inick_ then
-			self:proto_error_(command .. " command addressed to the wrong client")
-			return
+			return false
 		end
 	end
 	local ok, err = proto.check_command(command, ...)
 	if not ok then
 		self:proto_error_(err)
+		return
 	end
+	return true
 end
 
 function client_i:read_()
@@ -161,12 +164,17 @@ function client_i:read_()
 				if self.debug_ then
 					self.debug_(self.last_prefix_.inick, command, table.unpack(params))
 				end
-				self:check_command_(command, table.unpack(params))
-				self:trigger_pre_command__(command, table.unpack(params))
+				local process = self:check_command_(command, table.unpack(params))
 				if self.dead_ then
 					break
 				end
-				self:trigger_command_(command, table.unpack(params))
+				if process then
+					self:trigger_pre_command__(command, table.unpack(params))
+					if self.dead_ then
+						break
+					end
+					self:trigger_command_(command, table.unpack(params))
+				end
 				buf = buf:sub(line_ends_at + 1)
 			end
 		elseif err ~= errno.EAGAIN then
@@ -416,10 +424,11 @@ function client_i:handle_privmsg_(target, message)
 	else
 		local ichan = self:lower(target)
 		local channel = self.channels_[ichan]
-		if not channel then
-			return nil, "PRIVMSG command with channel not yet joined"
+		if channel then
+			self:trigger_channel_privmsg_(channel, message)
+		else
+			self:trigger_unknown_privmsg_(target, message)
 		end
-		self:trigger_channel_privmsg_(channel, message)
 	end
 	return true
 end
@@ -430,10 +439,12 @@ function client_i:handle_notice_(target, message)
 	else
 		local ichan = self:lower(target)
 		local channel = self.channels_[ichan]
-		if not channel then
-			return nil, "NOTICE command with channel not yet joined"
-		end
 		self:trigger_channel_notice_(channel, message)
+		if channel then
+			self:trigger_channel_notice_(channel, message)
+		else
+			self:trigger_unknown_notice_(target, message)
+		end
 	end
 	return true
 end
@@ -449,15 +460,20 @@ function client_i:handle_RPL_ENDOFNAMES_(chan)
 	end
 	local inicks = {}
 	for entry in table.concat(channel.namreply_, " "):gmatch("[^ ]+") do
-		local status, nick = entry:match("^(.)(.+)$")
-		if not status then
+		local status = self.names_prefixes_[entry:sub(1, 1)]
+		if status then
+			entry = entry:sub(2)
+		end
+		local nick = entry
+		if not util.valid_nick(nick) then
 			return nil, "RPL_NAMREPLY command with invalid user list"
 		end
-		if inicks[nick] then
+		local inick = self:lower(nick)
+		if inicks[inick] then
 			return nil, "RPL_NAMREPLY command with duplicate entries"
 		end
-		inicks[self:lower(nick)] = {
-			status = status,
+		inicks[inick] = {
+			status = status or false,
 			nick = nick,
 		}
 	end
@@ -678,7 +694,7 @@ function client_i:queue_1_part_(chan, message)
 		return true
 	end
 	local done = promise.new()
-	self:wait_for_response_(function(command, ...)
+	self:wait_for_response_(done, function(command, ...)
 		repeat
 			if command == "part" then
 				if self.last_prefix_.is_self and not self:channel(ichan) then
@@ -716,7 +732,7 @@ function client_i:queue_0_set_nick_(nick)
 		return true
 	end
 	local done = promise.new()
-	self:wait_for_response_(function(command, ...)
+	self:wait_for_response_(done, function(command, ...)
 		repeat
 			if command == "nick" then
 				if self.last_prefix_.is_self and self:inick() == inick then
@@ -763,7 +779,7 @@ function client_i:queue_1_whois_(nick)
 	local info = {}
 	self.whois_[inick] = info
 	local done = promise.new()
-	self:wait_for_response_(function(command, ...)
+	self:wait_for_response_(done, function(command, ...)
 		repeat
 			if command == proto.msgno.RPL_ENDOFWHOIS then
 				done:set(true, true)
@@ -1032,6 +1048,10 @@ local function new(params)
 		last_prefix_ = {},
 		whois_ = {},
 		debug_ = params.debug,
+		names_prefixes_ = {
+			[ "@" ] = "o",
+			[ "+" ] = "v",
+		},
 	}, client_m)
 	cli.inick_ = cli:lower(cli.nick_)
 	for name in pairs(hook_names) do
