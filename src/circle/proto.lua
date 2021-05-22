@@ -253,6 +253,43 @@ function command_checks.nick(nick)
 	return true
 end
 
+function command_checks.join(channel)
+	if not util.valid_channel(channel) then
+		return nil, "JOIN command with invalid channel field"
+	end
+	return true
+end
+
+function command_checks.part(channel, message)
+	if not util.valid_channel(channel) then
+		return nil, "PART command with invalid channel field"
+	end
+	if message ~= nil and not util.valid_message(message) then
+		return nil, "PART command with invalid message field"
+	end
+	return true
+end
+
+function command_checks.quit(message)
+	if message ~= nil and not util.valid_message(message) then
+		return nil, "QUIT command with invalid message field"
+	end
+	return true
+end
+
+function command_checks.kick(channel, nick, message)
+	if not util.valid_channel(channel) then
+		return nil, "KICK command with invalid channel field"
+	end
+	if not util.valid_nick(nick) then
+		return nil, "KICK command with invalid nick field"
+	end
+	if message ~= nil and not util.valid_message(message) then
+		return nil, "KICK command with invalid message field"
+	end
+	return true
+end
+
 function command_checks.RPL_NAMREPLY(visibility, channel, list)
 	if not util.valid_visibility(visibility) then
 		-- * TODO: visibilities?

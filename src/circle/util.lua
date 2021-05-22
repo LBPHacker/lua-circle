@@ -119,12 +119,6 @@ local function valid_pinginfo(info)
 	return type(info) == "string" and not info:find("[\0\r\n]")
 end
 
-local function clean(tbl)
-	while next(tbl) do
-		tbl[next(tbl)] = nil
-	end
-end
-
 return {
 	integer = integer,
 	default_tls_context = default_tls_context,

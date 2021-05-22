@@ -44,8 +44,10 @@ end
 
 function client_i:die_(message)
 	if not self.dead_ then
+		print(message)
 		self.dead_ = message
 		self:close_()
+		self:trigger_die_()
 	end
 end
 
@@ -102,6 +104,11 @@ define_hook("channel_privmsg")
 define_hook("self_notice")
 define_hook("channel_notice")
 define_hook("channel_topic")
+define_hook("die")
+define_hook("other_quit")
+define_hook("self_quit")
+define_hook("other_kick")
+define_hook("self_kick")
 
 function client_i:check_command_(command, ...)
 	if command:find("^%d+$") then
@@ -138,7 +145,9 @@ function client_i:read_()
 					break
 				end
 				local line = buf:sub(1, line_ends_at - 2)
-				-- print(line)
+				if self.debug_ then
+					self.debug_(line)
+				end
 				if line:find("[\0\r\n]") then
 					self:proto_error_("invalid octets in stream")
 					break
@@ -149,7 +158,9 @@ function client_i:read_()
 					break
 				end
 				self:process_prefix_(prefix)
-				-- print(self.last_prefix_.inick, command, table.unpack(params))
+				if self.debug_ then
+					self.debug_(self.last_prefix_.inick, command, table.unpack(params))
+				end
 				self:check_command_(command, table.unpack(params))
 				self:trigger_pre_command__(command, table.unpack(params))
 				if self.dead_ then
@@ -171,7 +182,9 @@ end
 
 function client_i:close_()
 	if self.socket_ then
-		-- print("closed", debug.traceback())
+		if self.debug_ then
+			self.debug_("closed", debug.traceback())
+		end
 		self.socket_:flush("n", self.sendq_flush_timeout_)
 		self.socket_:shutdown("rw") -- * Also shuts down the read_ loop.
 		self.socket_ = nil
@@ -250,6 +263,60 @@ function user_i:inick()
 	return self.inick_
 end
 
+function client_i:remove_user_from_channel_(nick, chan, reason, message)
+	local inick = self:lower(nick)
+	local ichan = self:lower(chan)
+	local channel = self.channels_[ichan]
+	local user = self.users_[inick]
+	if reason == "other_part" then
+		if not user then
+			return nil, "PART command from unknown user"
+		end
+		self:trigger_other_part_(user, channel, message)
+	end
+	if reason == "other_kick" then
+		if not user then
+			return nil, "KICK command pertaining to unknown user"
+		end
+		self:trigger_other_kick_(user, channel, message)
+	end
+	user.channels_[channel] = nil
+	channel.users_[user] = nil
+	if not next(user.channels_) then
+		self:trigger_user_disappear_(user)
+		self.users_[inick] = nil
+	end
+	return true
+end
+
+function client_i:add_user_to_channel_(nick, chan, reason)
+	local inick = self:lower(nick)
+	local ichan = self:lower(chan)
+	local channel = self.channels_[ichan]
+	local user = self.users_[inick]
+	if not user then
+		user = setmetatable({
+			nick_ = nick,
+			inick_ = inick,
+			valid_ = true,
+			channels_ = {},
+		}, user_m)
+		self.users_[inick] = user
+		self:trigger_user_appear_(user)
+	end
+	if reason == "other_join" then
+		if user.channels_[channel] then
+			return nil, "JOIN command from user already present"
+		end
+	end
+	user.channels_[channel] = true
+	channel.users_[user] = true
+	if reason == "other_join" then
+		self:trigger_other_join_(user, channel)
+	end
+	return true
+end
+
 function client_i:handle_join_(chan)
 	local ichan = self:lower(chan)
 	if self.last_prefix_.is_self then
@@ -265,59 +332,66 @@ function client_i:handle_join_(chan)
 			topic_ = false,
 		}, channel_m)
 		self.channels_[ichan] = channel
-		self:trigger_self_join_(channel)
 	else
-		local channel = self.channels_[ichan]
-		local user = self.users_[self.last_prefix_.inick]
-		if not user then
-			user = setmetatable({
-				nick_ = self.last_prefix_.nick,
-				inick_ = self.last_prefix_.inick,
-				valid_ = true,
-				channels_ = {},
-			}, user_m)
-			self.users_[self.last_prefix_.inick] = user
-			self:trigger_user_appear_(user)
+		local ok, err = self:add_user_to_channel_(self.last_prefix_.nick, chan, "other_join")
+		if not ok then
+			return nil, err
 		end
-		if user.channels_[channel] then
-			return nil, "JOIN command from user already present"
-		end
-		user.channels_[channel] = true
-		channel.users_[user] = true
-		self:trigger_other_join_(user, channel)
 	end
 	return true
 end
 
-function client_i:handle_part_(chan)
+function client_i:handle_quit_(message)
+	local user = self.users_[self.last_prefix_.inick]
+	if not user then
+		return nil, "QUIT command from unknown user"
+	end
+	while next(user.channels_) do
+		self:remove_user_from_channel_(self.last_prefix_.nick, next(user.channels_).name_, "other_quit")
+	end
+	self:trigger_other_quit_(user, message)
+	return true
+end
+
+function client_i:handle_kick_(channel, nick, message)
+	local ichan = self:lower(chan)
+	local channel = self.channels_[ichan]
+	if self:is_self(nick) then
+		if not channel then
+			return nil, "KICK command with channel not yet joined"
+		end
+		self:trigger_self_kick_(channel, message)
+		while next(channel.users_) do
+			self:remove_user_from_channel_(next(channel.users_).nick, chan, "self_kick")
+		end
+		self.channels_[ichan] = nil
+		channel.valid_ = false
+	else
+		local ok, err = self:remove_user_from_channel_(nick, chan, "other_kick", message)
+		if not ok then
+			return nil, err
+		end
+	end
+	return true
+end
+
+function client_i:handle_part_(chan, message)
 	local ichan = self:lower(chan)
 	local channel = self.channels_[ichan]
 	if self.last_prefix_.is_self then
 		if not channel then
 			return nil, "PART command with channel not yet joined"
 		end
-		for user in pairs(channel.users_) do
-			user.channels_[channel] = nil
-			if not next(user.channels_) then
-				self:trigger_user_disappear_(user)
-				self.users_[self.last_prefix_.inick] = nil
-			end
+		self:trigger_self_part_(channel, message)
+		while next(channel.users_) do
+			self:remove_user_from_channel_(next(channel.users_).nick, chan, "self_part")
 		end
-		self:trigger_self_part_(channel)
 		self.channels_[ichan] = nil
-		util.clean(channel.users_)
 		channel.valid_ = false
 	else
-		local user = self.users_[self.last_prefix_.inick]
-		if not user then
-			return nil, "PART command from unknown user"
-		end
-		self:trigger_other_part_(user, channel)
-		user.channels_[channel] = nil
-		channel.users_[user] = nil
-		if not next(user.channels_) then
-			self:trigger_user_disappear_(user)
-			self.users_[self.last_prefix_.inick] = nil
+		local ok, err = self:remove_user_from_channel_(self.last_prefix_.nick, chan, "other_part", message)
+		if not ok then
+			return nil, err
 		end
 	end
 	return true
@@ -400,22 +474,10 @@ function client_i:handle_RPL_ENDOFNAMES_(chan)
 		end
 	else
 		for inick, info in pairs(inicks) do
-			local user = self.users_[inick]
-			if not user then
-				user = setmetatable({
-					nick_ = info.nick,
-					inick_ = inick,
-					valid_ = true,
-					channels_ = {},
-				}, user_m)
-				self.users_[inick] = user
-				self:trigger_user_appear_(user)
-			end
-			user.channels_[channel] = true
-			channel.users_[user] = true
-			self:trigger_other_join_(user, channel)
+			self:add_user_to_channel_(info.nick, chan, "self_join")
 		end
 		channel.init_done_ = true
+		self:trigger_self_join_(channel)
 	end
 	channel.namreply_ = nil
 	return true
@@ -495,7 +557,7 @@ function client_i:handle_nick_(nick)
 	else
 		local prev = self.last_prefix_.inick
 		if not self.users_[prev] then
-			return nil, "nick from unknown user"
+			return nil, "NICK command from unknown user"
 		end
 		local user = self.users_[prev]
 		user.nick = nick
@@ -533,6 +595,24 @@ function client_i:forward_command_(command, first, ...)
 	return true
 end
 
+function client_i:wait_for_response_(done, check)
+	local die_hook, command_hook
+	function die_hook()
+		done:set(true, false, "cancelled: " .. self.dead_)
+		self:unhook("die", die_hook)
+		self:unhook("command", command_hook)
+	end
+	function command_hook(command, ...)
+		check(command, ...)
+		if done:status() ~= "pending" then
+			self:unhook("die", die_hook)
+			self:unhook("command", command_hook)
+		end
+	end
+	self:hook("die", die_hook)
+	self:hook("command", command_hook)
+end
+
 function client_i:queue_1_join_(chan, key)
 	if self.status_ ~= "running" then
 		return nil, "not running"
@@ -547,7 +627,7 @@ function client_i:queue_1_join_(chan, key)
 		return true
 	end
 	local done = promise.new()
-	local function handle_response(command, ...)
+	self:wait_for_response_(done, function(command, ...)
 		repeat
 			if command == "join" then
 				if self.last_prefix_.is_self and self:channel(ichan) then
@@ -572,14 +652,7 @@ function client_i:queue_1_join_(chan, key)
 				end
 			end
 		until true
-		if self.dead_ then
-			done:set(true, false, "cancelled: " .. self.dead_)
-		end
-		if done:status() ~= "pending" then
-			self:unhook("command", handle_response)
-		end
-	end
-	self:hook("command", handle_response)
+	end)
 	local ok, err = self:multisend_({ { "join", { chan, key } } })
 	if not ok then
 		return nil, "send failed: " .. err
@@ -591,11 +664,12 @@ function client_i:queue_1_join_(chan, key)
 	return true
 end
 
-function client_i:queue_1_part_(chan)
+function client_i:queue_1_part_(chan, message)
 	if self.status_ ~= "running" then
 		return nil, "not running"
 	end
 	assert(util.valid_channel(chan), "argument #1 is invalid")
+	assert(message == nil, util.valid_message(message), "argument #2 is invalid")
 	local ichan = self:lower(chan)
 	if self.dead_ then
 		return nil, "cancelled: " .. self.dead_
@@ -604,7 +678,7 @@ function client_i:queue_1_part_(chan)
 		return true
 	end
 	local done = promise.new()
-	local function handle_response(command, ...)
+	self:wait_for_response_(function(command, ...)
 		repeat
 			if command == "part" then
 				if self.last_prefix_.is_self and not self:channel(ichan) then
@@ -617,15 +691,8 @@ function client_i:queue_1_part_(chan)
 				end
 			end
 		until true
-		if self.dead_ then
-			done:set(true, false, "cancelled: " .. self.dead_)
-		end
-		if done:status() ~= "pending" then
-			self:unhook("command", handle_response)
-		end
-	end
-	self:hook("command", handle_response)
-	local ok, err = self:multisend_({ { "part", { chan } } })
+	end)
+	local ok, err = self:multisend_({ { "part", { chan }, message } })
 	if not ok then
 		return nil, "send failed: " .. err
 	end
@@ -649,7 +716,7 @@ function client_i:queue_0_set_nick_(nick)
 		return true
 	end
 	local done = promise.new()
-	local function handle_response(command, ...)
+	self:wait_for_response_(function(command, ...)
 		repeat
 			if command == "nick" then
 				if self.last_prefix_.is_self and self:inick() == inick then
@@ -672,14 +739,7 @@ function client_i:queue_0_set_nick_(nick)
 				end
 			end
 		until true
-		if self.dead_ then
-			done:set(true, false, "cancelled: " .. self.dead_)
-		end
-		if done:status() ~= "pending" then
-			self:unhook("command", handle_response)
-		end
-	end
-	self:hook("command", handle_response)
+	end)
 	local ok, err = self:multisend_({ { "nick", { nick } } })
 	if not ok then
 		return nil, "send failed: " .. err
@@ -700,14 +760,13 @@ function client_i:queue_1_whois_(nick)
 	if self.dead_ then
 		return nil, "cancelled: " .. self.dead_
 	end
-	self.whois_[inick] = {}
+	local info = {}
+	self.whois_[inick] = info
 	local done = promise.new()
-	local function handle_response(command, ...)
+	self:wait_for_response_(function(command, ...)
 		repeat
 			if command == proto.msgno.RPL_ENDOFWHOIS then
-				local info = self.whois_[inick] or {}
-				self.whois_[inick] = nil
-				done:set(true, info)
+				done:set(true, true)
 			elseif command == proto.msgno.ERR_NOSUCHNICK then
 				done:set(true, false, "no such nick")
 			elseif command == proto.msgno.RPL_TRYAGAIN then
@@ -717,19 +776,13 @@ function client_i:queue_1_whois_(nick)
 				end
 			end
 		until true
-		if self.dead_ then
-			done:set(true, false, "cancelled: " .. self.dead_)
-		end
-		if done:status() ~= "pending" then
-			self:unhook("command", handle_response)
-		end
-	end
-	self:hook("command", handle_response)
+	end)
+	self.whois_[inick] = nil
 	local ok, err = self:multisend_({ { "whois", { nick } } })
 	if not ok then
 		return nil, "send failed: " .. err
 	end
-	local info, err = done:get()
+	local ok, err = done:get()
 	if not ok then
 		return nil, err
 	end
@@ -825,6 +878,7 @@ function client_i:queue_0_quit_(message)
 	if self.status_ ~= "running" then
 		return nil, "not running"
 	end
+	self:trigger_self_quit_(message)
 	self.status_ = "stopping"
 	self:multisend_({ { "quit", {}, message or "bye" } })
 	self:close_()
@@ -877,7 +931,9 @@ function client_i:send_(command, middles, trailing, prefix)
 	if not line then
 		return nil, err
 	end
-	-- print(line)
+	if self.debug_ then
+		self.debug_(line)
+	end
 	local ok, err = self.socket_:write(line)
 	if not ok then
 		if self.socket_:eof("w") then
@@ -903,12 +959,14 @@ do
 			key_params = tonumber(key_params)
 			local function qfunc(self, ...)
 				local params = { name, ... }
+				local iparams = { name, ... }
 				for i = 1, key_params do
 					if type(params[i + 1]) ~= "string" then
 						error("argument #" .. i .. " is not a string")
 					end
+					iparams[i + 1] = self:lower(iparams[i + 1])
 				end
-				local key = table.concat(params, " ")
+				local key = table.concat(iparams, " ")
 				local prev = self.queues_[key]
 				local curr = {
 					params = params,
@@ -973,6 +1031,7 @@ local function new(params)
 		read_size_ = params.read_size_ or 512,
 		last_prefix_ = {},
 		whois_ = {},
+		debug_ = params.debug,
 	}, client_m)
 	cli.inick_ = cli:lower(cli.nick_)
 	for name in pairs(hook_names) do
