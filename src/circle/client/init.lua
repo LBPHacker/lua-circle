@@ -123,25 +123,27 @@ end
 
 function client_i:read_()
 	local socket = self.socket_
-	local line = ""
+	local buf = ""
 	while not self.dead_ do
 		local data, err = socket:read(-self.read_size_)
 		if data then
-			line = line .. data
+			buf = buf .. data
 			while true do
-				local line_ends_at = line:find("[\r\n]")
+				local _, line_ends_at = buf:find("\r\n")
 				if not line_ends_at then
 					break
-				end
-				local before_cr_lf = line_ends_at - 1
-				if line:byte(line_ends_at) == 13 and line:byte(line_ends_at + 1) == 10 then
-					line_ends_at = line_ends_at + 1
 				end
 				if line_ends_at > self.message_size_limit_ then
 					self:proto_error_("message size limit exceeded")
 					break
 				end
-				local command, params, prefix = proto.parse_line(line:sub(1, before_cr_lf))
+				local line = buf:sub(1, line_ends_at - 2)
+				-- print(line)
+				if line:find("[\0\r\n]") then
+					self:proto_error_("invalid octets in stream")
+					break
+				end
+				local command, params, prefix = proto.parse_line(line)
 				if not command then
 					self:proto_error_("failed to parse line: " .. params)
 					break
@@ -154,7 +156,7 @@ function client_i:read_()
 					break
 				end
 				self:trigger_command_(command, table.unpack(params))
-				line = line:sub(line_ends_at + 1)
+				buf = buf:sub(line_ends_at + 1)
 			end
 		elseif err ~= errno.EAGAIN then
 			if socket:eof("r") then
@@ -169,6 +171,7 @@ end
 
 function client_i:close_()
 	if self.socket_ then
+		-- print("closed", debug.traceback())
 		self.socket_:flush("n", self.sendq_flush_timeout_)
 		self.socket_:shutdown("rw") -- * Also shuts down the read_ loop.
 		self.socket_ = nil
