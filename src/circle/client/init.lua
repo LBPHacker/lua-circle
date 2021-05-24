@@ -364,7 +364,7 @@ function client_i:handle_quit_(message)
 	return true
 end
 
-function client_i:handle_kick_(channel, nick, message)
+function client_i:handle_kick_(chan, nick, message)
 	local ichan = self:lower(chan)
 	local channel = self.channels_[ichan]
 	if self:is_self(nick) then
