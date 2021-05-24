@@ -43,9 +43,12 @@ function client_i:nick(nick)
 end
 
 function client_i:die_(message)
-	if not self.dead_ then
-		print(message)
-		self.dead_ = message
+	if self.status_ ~= "dead" then
+		if self.debug_ then
+			self.debug_("die", message)
+		end
+		self.status_ = "dead"
+		self.death_reason_ = message
 		self:close_()
 		self:trigger_die_()
 	end
@@ -134,7 +137,7 @@ end
 function client_i:read_()
 	local socket = self.socket_
 	local buf = ""
-	while not self.dead_ do
+	while self.status_ ~= "dead" do
 		local data, err = socket:read(-self.read_size_)
 		if data then
 			buf = buf .. data
@@ -165,12 +168,12 @@ function client_i:read_()
 					self.debug_(self.last_prefix_.inick, command, table.unpack(params))
 				end
 				local process = self:check_command_(command, table.unpack(params))
-				if self.dead_ then
+				if self.status_ == "dead" then
 					break
 				end
 				if process then
 					self:trigger_pre_command__(command, table.unpack(params))
-					if self.dead_ then
+					if self.status_ == "dead" then
 						break
 					end
 					self:trigger_command_(command, table.unpack(params))
@@ -190,9 +193,9 @@ end
 
 function client_i:close_()
 	if self.socket_ then
-		if self.debug_ then
-			self.debug_("closed", debug.traceback())
-		end
+		-- if self.debug_ then
+		-- 	self.debug_("closed", debug.traceback())
+		-- end
 		self.socket_:flush("n", self.sendq_flush_timeout_)
 		self.socket_:shutdown("rw") -- * Also shuts down the read_ loop.
 		self.socket_ = nil
@@ -554,6 +557,16 @@ function client_i:handle_RPL_TOPIC_(chan, topic)
 	return true
 end
 
+function client_i:raw(line)
+	if line:sub(-2, -1) == "\r\n" then
+		line = line:sub(1, -3)
+	end
+	if line:find("[\0\r\n]") then
+		return nil, "malformed line"
+	end
+	return self:send_line_(line .. "\r\n")
+end
+
 function client_i:handle_ping_(server, server2)
 	if server2 then
 		self:send_("pong", { server }, server2)
@@ -578,7 +591,7 @@ function client_i:handle_nick_(nick)
 		local user = self.users_[prev]
 		user.nick = nick
 		user.inick = inick
-		self.users_[nick] = user
+		self.users_[inick] = user
 		self.users_[prev] = nil
 		self:trigger_other_nick_(user, prev)
 	end
@@ -614,7 +627,7 @@ end
 function client_i:wait_for_response_(done, check)
 	local die_hook, command_hook
 	function die_hook()
-		done:set(true, false, "cancelled: " .. self.dead_)
+		done:set(true, false, "cancelled: " .. self.death_reason_)
 		self:unhook("die", die_hook)
 		self:unhook("command", command_hook)
 	end
@@ -636,9 +649,6 @@ function client_i:queue_1_join_(chan, key)
 	assert(util.valid_channel(chan) and chan ~= "0", "argument #1 is invalid")
 	assert(key == nil or util.valid_key(key), "argument #2 is invalid")
 	local ichan = self:lower(chan)
-	if self.dead_ then
-		return nil, "cancelled: " .. self.dead_
-	end
 	if self:channel(ichan) then
 		return true
 	end
@@ -687,9 +697,6 @@ function client_i:queue_1_part_(chan, message)
 	assert(util.valid_channel(chan), "argument #1 is invalid")
 	assert(message == nil, util.valid_message(message), "argument #2 is invalid")
 	local ichan = self:lower(chan)
-	if self.dead_ then
-		return nil, "cancelled: " .. self.dead_
-	end
 	if not self:channel(ichan) then
 		return true
 	end
@@ -725,9 +732,6 @@ function client_i:queue_0_set_nick_(nick)
 	end
 	assert(util.valid_nick(nick), "argument #1 is invalid")
 	local inick = self:lower(nick)
-	if self.dead_ then
-		return nil, "cancelled: " .. self.dead_
-	end
 	if self:inick() == inick then
 		return true
 	end
@@ -773,9 +777,6 @@ function client_i:queue_1_whois_(nick)
 	end
 	assert(util.valid_nick(nick), "argument #1 is invalid")
 	local inick = self:lower(nick)
-	if self.dead_ then
-		return nil, "cancelled: " .. self.dead_
-	end
 	local info = {}
 	self.whois_[inick] = info
 	local done = promise.new()
@@ -897,7 +898,7 @@ function client_i:queue_0_quit_(message)
 	self:trigger_self_quit_(message)
 	self.status_ = "stopping"
 	self:multisend_({ { "quit", {}, message or "bye" } })
-	self:close_()
+	self:die_("quit")
 	self.status_ = "dead"
 	return true
 end
@@ -932,8 +933,28 @@ function client_i:multisend_(batch)
 	for i = 1, #batch do
 		local ok, err = self:send_(table.unpack(batch[i]))
 		if not ok then
-			self:close_()
 			return nil, err
+		end
+	end
+	return true
+end
+
+function client_i:send_line_(line)
+	local ok, err = self.socket_:write(line)
+	if not ok then
+		if self.socket_:eof("w") then
+			self:close_()
+			return nil, "connection closed"
+		else
+			self:close_()
+			return nil, "send failed with code " .. err
+		end
+	end
+	if self.sendq_limit_ then
+		local _, sendq = self.socket_:pending()
+		if sendq > self.sendq_limit_ then
+			self:close_()
+			return nil, "send queue limit exceeded"
 		end
 	end
 	return true
@@ -950,21 +971,7 @@ function client_i:send_(command, middles, trailing, prefix)
 	if self.debug_ then
 		self.debug_(line)
 	end
-	local ok, err = self.socket_:write(line)
-	if not ok then
-		if self.socket_:eof("w") then
-			return nil, "connection closed"
-		else
-			return nil, "send failed with code " .. err
-		end
-	end
-	if self.sendq_limit_ then
-		local _, sendq = self.socket_:pending()
-		if sendq > self.sendq_limit_ then
-			return nil, "send queue limit exceeded"
-		end
-	end
-	return true
+	return self:send_line_(line)
 end
 
 do
