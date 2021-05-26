@@ -21,10 +21,12 @@ local function default_tls_context()
 		"ECDHE-RSA-AES128-SHA256",
 	}, ":"))
 	ctx:setOptions(
-		ssl_ctx.OP_NO_COMPRESSION |
+		ssl_ctx.OP_NO_COMPRESSION  |
 		ssl_ctx.OP_SINGLE_ECDH_USE |
-		ssl_ctx.OP_NO_SSLv2 |
-		ssl_ctx.OP_NO_SSLv3
+		ssl_ctx.OP_NO_SSLv2        |
+		ssl_ctx.OP_NO_SSLv3        |
+		ssl_ctx.OP_NO_TLSv1        |
+		ssl_ctx.OP_NO_TLSv1_1
 	)
 	ctx:setEphemeralKey(ssl_pkey.new({
 		type = "EC",
