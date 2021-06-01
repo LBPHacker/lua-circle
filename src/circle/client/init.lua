@@ -591,8 +591,8 @@ function client_i:handle_nick_(nick)
 		local user = self.users_[prev]
 		user.nick = nick
 		user.inick = inick
-		self.users_[inick] = user
 		self.users_[prev] = nil
+		self.users_[inick] = user
 		self:trigger_other_nick_(user, prev)
 	end
 	return true
