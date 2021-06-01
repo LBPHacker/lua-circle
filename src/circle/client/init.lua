@@ -579,7 +579,7 @@ end
 function client_i:handle_nick_(nick)
 	local inick = self:lower(nick)
 	if self.last_prefix_.is_self then
-		local prev = self.nick
+		local prev = self.nick_
 		self.nick_ = nick
 		self.inick_ = inick
 		self:trigger_self_nick_(prev)
@@ -589,8 +589,8 @@ function client_i:handle_nick_(nick)
 			return nil, "NICK command from unknown user"
 		end
 		local user = self.users_[prev]
-		user.nick = nick
-		user.inick = inick
+		user.nick_ = nick
+		user.inick_ = inick
 		self.users_[prev] = nil
 		self.users_[inick] = user
 		self:trigger_other_nick_(user, prev)
