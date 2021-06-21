@@ -114,6 +114,7 @@ define_hook("other_quit")
 define_hook("self_quit")
 define_hook("other_kick")
 define_hook("self_kick")
+define_hook("proxy_reconnect")
 
 function client_i:check_command_(command, ...)
 	if command:find("^%d+$") then
@@ -404,6 +405,16 @@ function client_i:handle_part_(chan, message)
 		if not ok then
 			return nil, err
 		end
+	end
+	return true
+end
+
+function client_i:handle_RPL_WELCOME_()
+	if self.got_welcome_ then
+		self:trigger_proxy_reconnect_()
+		self:quit()
+	else
+		self.got_welcome_ = true
 	end
 	return true
 end
